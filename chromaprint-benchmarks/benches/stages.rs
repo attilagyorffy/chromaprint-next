@@ -15,6 +15,8 @@ use chromaprint_benchmarks::utils::generate_synthetic_audio;
 struct StageData {
     /// Input: 30s synthetic audio at 44100 Hz mono
     input_audio: Vec<i16>,
+    /// Input: the same 30s audio as interleaved stereo (L = input, R = inverted input)
+    input_audio_stereo: Vec<i16>,
     /// After AudioProcessor: resampled to 11025 Hz mono
     resampled: Vec<i16>,
     /// After FftProcessor: power spectrum frames
@@ -26,6 +28,10 @@ struct StageData {
 fn prepare_stage_data() -> StageData {
     let cfg = config::get_config(Algorithm::Test2);
     let input_audio = generate_synthetic_audio(30.0, 44100);
+    let input_audio_stereo: Vec<i16> = input_audio
+        .iter()
+        .flat_map(|&s| [s, s.wrapping_neg()])
+        .collect();
 
     // Stage 1: AudioProcessor → resampled mono
     let mut resampled = Vec::new();
@@ -60,6 +66,7 @@ fn prepare_stage_data() -> StageData {
 
     StageData {
         input_audio,
+        input_audio_stereo,
         resampled,
         power_spectra,
         chroma_vectors,
@@ -78,6 +85,16 @@ fn stage_benchmarks(c: &mut Criterion) {
             let mut proc = AudioProcessor::new(cfg.sample_rate);
             proc.reset(44100, 1).unwrap();
             proc.consume(&data.input_audio, |_| {});
+            proc.flush(|_| {});
+        });
+    });
+
+    // Stage 1b: Audio processing from stereo input (stereo-to-mono mixing + resampling)
+    group.bench_function("1b_audio_processing_stereo", |b| {
+        b.iter(|| {
+            let mut proc = AudioProcessor::new(cfg.sample_rate);
+            proc.reset(44100, 2).unwrap();
+            proc.consume(&data.input_audio_stereo, |_| {});
             proc.flush(|_| {});
         });
     });
