@@ -58,11 +58,11 @@ fn process_subfingerprint(mut x: u32, normal: &mut Vec<u8>, exceptional: &mut Ve
 }
 
 fn packed_int3_size(size: usize) -> usize {
-    (size * 3 + 7) / 8
+    (size * 3).div_ceil(8)
 }
 
 fn packed_int5_size(size: usize) -> usize {
-    (size * 5 + 7) / 8
+    (size * 5).div_ceil(8)
 }
 
 fn pack_int3_array(src: &[u8], dest: &mut [u8]) {

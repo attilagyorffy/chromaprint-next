@@ -7,6 +7,9 @@ use std::arch::x86::*;
 ///
 /// Uses `_mm_madd_epi16` which multiplies 8 i16 pairs and pairwise-adds
 /// the products into 4 i32 results — ideal for this pattern.
+///
+/// # Safety
+/// The CPU must support SSE2 and `a.len() == b.len()`.
 #[inline]
 #[target_feature(enable = "sse2")]
 pub unsafe fn dot_product_i16(a: &[i16], b: &[i16]) -> i32 {
@@ -52,7 +55,7 @@ pub unsafe fn dot_product_i16(a: &[i16], b: &[i16]) -> i32 {
 
     // Scalar tail (0-7 elements)
     for i in 0..(len - offset) {
-        result += *a_ptr.add(offset + i) as i32 * *b_ptr.add(offset + i) as i32;
+        result = result.wrapping_add(*a_ptr.add(offset + i) as i32 * *b_ptr.add(offset + i) as i32);
     }
 
     result
@@ -62,6 +65,9 @@ pub unsafe fn dot_product_i16(a: &[i16], b: &[i16]) -> i32 {
 ///
 /// Uses `_mm_madd_epi16` with a vector of all 1s to sum adjacent L+R pairs
 /// into i32, then divides by 2 with truncation toward zero and packs back to i16.
+///
+/// # Safety
+/// The CPU must support SSE2 and `input.len() == output.len() * 2`.
 #[inline]
 #[target_feature(enable = "sse2")]
 pub unsafe fn stereo_to_mono(input: &[i16], output: &mut [i16]) {
@@ -108,6 +114,9 @@ pub unsafe fn stereo_to_mono(input: &[i16], output: &mut [i16]) {
 /// Converts i16 samples to f32 and multiplies by pre-computed window
 /// coefficients. Loads 4 i16 values, sign-extends to i32 via
 /// `_mm_srai_epi16`+`_mm_unpacklo_epi16`, converts to f32, and multiplies.
+///
+/// # Safety
+/// The CPU must support SSE2 and all three slices must have equal length.
 #[inline]
 #[target_feature(enable = "sse2")]
 pub unsafe fn window_apply(input: &[i16], window: &[f32], output: &mut [f32]) {

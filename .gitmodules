@@ -1,6 +1,6 @@
 [submodule "chromaprint"]
 	path = chromaprint
-	url = git@github.com:acoustid/chromaprint.git
+	url = https://github.com/acoustid/chromaprint.git
 [submodule "rusty-chromaprint"]
 	path = rusty-chromaprint
-	url = git@github.com:darksv/rusty-chromaprint.git
+	url = https://github.com/darksv/rusty-chromaprint.git

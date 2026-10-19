@@ -55,7 +55,6 @@ let (raw, algorithm) = decode_fingerprint("AQAAEwkjrUmS...").unwrap();
 
 ## Features
 
-- `async` — Enables async support via [tokio](https://tokio.rs)
 - `parallel` — Enables batch fingerprinting via [rayon](https://github.com/rayon-rs/rayon)
 
 ```toml

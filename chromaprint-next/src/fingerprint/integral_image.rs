@@ -41,14 +41,18 @@ impl RollingIntegralImage {
 
         // Compute partial sums of the new row
         let mut running_sum: f64 = 0.0;
-        for i in 0..self.num_columns {
-            running_sum += row[i];
-            self.data[current_start + i] = running_sum;
+        for (&v, slot) in row
+            .iter()
+            .zip(self.data[current_start..current_start + self.num_columns].iter_mut())
+        {
+            running_sum += v;
+            *slot = running_sum;
         }
 
         // Add previous row's cumulative sums
         if self.num_rows > 0 {
             let prev_start = self.row_offset(self.num_rows - 1);
+            #[allow(clippy::needless_range_loop)] // reads and writes two row offsets of self.data
             for i in 0..self.num_columns {
                 self.data[current_start + i] += self.data[prev_start + i];
             }

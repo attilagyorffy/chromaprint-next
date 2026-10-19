@@ -2,6 +2,7 @@
 name = "chromaprint-next"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.80"
 description = "Audio fingerprinting library (Rust port of Chromaprint)"
 license = "MIT AND LGPL-2.1-or-later"
 authors = ["Attila Györffy <oss@attilagyorffy.com>"]
@@ -17,12 +18,9 @@ name = "chromaprint"
 
 [features]
 default = []
-async = ["dep:tokio"]
 parallel = ["dep:rayon"]
 
 [dependencies]
 realfft = "3"
 rayon = { version = "1", optional = true }
-tokio = { version = "1", features = ["io-util", "rt"], optional = true }
-base64 = "0.22"
 thiserror = "2"

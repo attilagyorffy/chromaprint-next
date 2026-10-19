@@ -17,10 +17,8 @@ pub fn load_raw_audio(filename: &str) -> Vec<i16> {
         bytes.len()
     );
 
-    bytes
-        .chunks_exact(2)
-        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect()
+    let (chunks, _) = bytes.as_chunks::<2>();
+    chunks.iter().map(|c| i16::from_le_bytes(*c)).collect()
 }
 
 /// Compare two raw fingerprint arrays with detailed diff output on failure.

@@ -7,8 +7,8 @@ const NORM_THRESHOLD: f64 = 0.01;
 #[inline]
 pub fn normalize(features: &mut ChromaVector) {
     let mut sum_sq: f64 = 0.0;
-    for i in 0..NUM_BANDS {
-        sum_sq += features[i] * features[i];
+    for &f in features.iter() {
+        sum_sq += f * f;
     }
 
     if sum_sq > 0.0 {
@@ -17,8 +17,8 @@ pub fn normalize(features: &mut ChromaVector) {
             *features = [0.0; NUM_BANDS];
         } else {
             let inv_norm = 1.0 / norm;
-            for i in 0..NUM_BANDS {
-                features[i] *= inv_norm;
+            for f in features.iter_mut() {
+                *f *= inv_norm;
             }
         }
     } else {

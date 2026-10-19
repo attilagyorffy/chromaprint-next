@@ -45,6 +45,7 @@ impl ChromaExtractor {
     pub fn extract(&self, frame: &[f32]) -> ChromaVector {
         let mut features = [0.0f64; NUM_BANDS];
 
+        #[allow(clippy::needless_range_loop)] // index shared across notes/notes_frac/frame
         for i in self.min_index..self.max_index {
             let note = self.notes[i] as usize;
             let energy = frame[i] as f64;

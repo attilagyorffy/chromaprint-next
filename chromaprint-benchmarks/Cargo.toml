@@ -9,7 +9,7 @@ chromaprint-next = { path = "../chromaprint-next" }
 rusty-chromaprint = { path = "../rusty-chromaprint/chromaprint" }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [build-dependencies]
 cmake = "0.1"

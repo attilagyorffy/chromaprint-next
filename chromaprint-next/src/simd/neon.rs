@@ -46,7 +46,7 @@ pub fn dot_product_i16(a: &[i16], b: &[i16]) -> i32 {
 
         // Scalar tail (0-3 elements)
         for i in 0..(len - offset) {
-            result += *a_ptr.add(offset + i) as i32 * *b_ptr.add(offset + i) as i32;
+            result = result.wrapping_add(*a_ptr.add(offset + i) as i32 * *b_ptr.add(offset + i) as i32);
         }
 
         result
@@ -60,7 +60,7 @@ pub fn dot_product_i16(a: &[i16], b: &[i16]) -> i32 {
 /// narrows back to i16.
 #[inline]
 pub fn stereo_to_mono(input: &[i16], output: &mut [i16]) {
-    debug_assert_eq!(input.len(), output.len() * 2);
+    assert_eq!(input.len(), output.len() * 2);
     let len = output.len();
 
     unsafe {
@@ -113,8 +113,8 @@ pub fn stereo_to_mono(input: &[i16], output: &mut [i16]) {
 /// coefficients. Processes 8 elements per iteration (two sets of 4 for ILP).
 #[inline]
 pub fn window_apply(input: &[i16], window: &[f32], output: &mut [f32]) {
-    debug_assert_eq!(input.len(), window.len());
-    debug_assert_eq!(input.len(), output.len());
+    assert_eq!(input.len(), window.len());
+    assert_eq!(input.len(), output.len());
     let len = input.len();
 
     unsafe {

@@ -37,7 +37,7 @@ fn build_filter(
 
     for ph in 0..phase_count {
         let mut norm: f64 = 0.0;
-        for i in 0..tap_count {
+        for (i, slot) in tab.iter_mut().enumerate() {
             let x = std::f64::consts::PI
                 * ((i as f64 - center as f64) - ph as f64 / phase_count as f64)
                 * factor;
@@ -47,14 +47,17 @@ fn build_filter(
             let w = 2.0 * x / (factor * tap_count as f64 * std::f64::consts::PI);
             y *= bessel(window_type as f64 * (1.0 - w * w).max(0.0).sqrt());
 
-            tab[i] = y;
+            *slot = y;
             norm += y;
         }
 
         // Normalize
-        for i in 0..tap_count {
-            let val = (tab[i] * scale as f64 / norm).round() as i32;
-            filter[ph * tap_count + i] = val.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        for (dst, &t) in filter[ph * tap_count..(ph + 1) * tap_count]
+            .iter_mut()
+            .zip(tab.iter())
+        {
+            let val = (t * scale as f64 / norm).round() as i32;
+            *dst = val.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         }
     }
 }
@@ -62,7 +65,6 @@ fn build_filter(
 pub struct AvResampleContext {
     filter_bank: Vec<i16>,
     filter_length: usize,
-    ideal_dst_incr: i32,
     dst_incr: i32,
     index: i32,
     frac: i32,
@@ -105,7 +107,6 @@ impl AvResampleContext {
         AvResampleContext {
             filter_bank,
             filter_length,
-            ideal_dst_incr: in_rate * phase_count,
             dst_incr: in_rate * phase_count,
             index: -phase_count * ((filter_length as i32 - 1) / 2),
             frac: 0,

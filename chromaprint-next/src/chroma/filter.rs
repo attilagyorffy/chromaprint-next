@@ -40,11 +40,10 @@ impl ChromaFilter {
         }
 
         let mut result = [0.0f64; NUM_BANDS];
-        for i in 0..self.coefficients.len() {
-            let coeff = self.coefficients[i];
+        for (i, &coeff) in self.coefficients.iter().enumerate() {
             let buf_idx = (self.buffer_offset + i) % BUFFER_SIZE;
-            for j in 0..NUM_BANDS {
-                result[j] += self.buffer[buf_idx][j] * coeff;
+            for (r, &b) in result.iter_mut().zip(self.buffer[buf_idx].iter()) {
+                *r += b * coeff;
             }
         }
 

@@ -8,10 +8,11 @@ pub const NUM_BANDS: usize = 12;
 pub type ChromaVector = [f64; NUM_BANDS];
 
 /// Algorithm version selector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
 pub enum Algorithm {
     Test1 = 0,
+    #[default]
     Test2 = 1,
     Test3 = 2,
     Test4 = 3,
@@ -28,12 +29,6 @@ impl Algorithm {
             4 => Some(Self::Test5),
             _ => None,
         }
-    }
-}
-
-impl Default for Algorithm {
-    fn default() -> Self {
-        Self::Test2
     }
 }
 

@@ -34,7 +34,7 @@ static DECODE_TABLE: [u8; 256] = {
 
 /// Encode binary data to chromaprint's URL-safe base64 (no padding).
 pub fn encode(data: &[u8]) -> String {
-    let mut result = String::with_capacity((data.len() * 4 + 2) / 3);
+    let mut result = String::with_capacity((data.len() * 4).div_ceil(3));
     let mut i = 0;
     let size = data.len();
 
@@ -99,4 +99,42 @@ pub fn decode(input: &str) -> Result<Vec<u8>> {
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_lengths_0_to_10() {
+        for len in 0..=10usize {
+            let data: Vec<u8> = (0..len).map(|i| (i * 37 + 11) as u8).collect();
+            let enc = encode(&data);
+            assert_eq!(decode(&enc).unwrap(), data, "len {len}");
+        }
+    }
+
+    #[test]
+    fn known_vectors() {
+        assert_eq!(encode(b""), "");
+        assert_eq!(encode(b"f"), "Zg");
+        assert_eq!(encode(b"fo"), "Zm8");
+        assert_eq!(encode(b"foo"), "Zm9v");
+        assert_eq!(encode(b"foob"), "Zm9vYg");
+        assert_eq!(encode(&[0xFB, 0xFF]), "-_8");
+        assert_eq!(decode("Zm9vYg").unwrap(), b"foob");
+    }
+
+    #[test]
+    fn no_padding_emitted() {
+        for len in 0..=10usize {
+            assert!(!encode(&vec![0xFFu8; len]).contains('='));
+        }
+    }
+
+    #[test]
+    fn decode_rejects_dangling_char() {
+        assert!(decode("Z").is_err());
+        assert!(decode("Zm9vY").is_err());
+    }
 }
