@@ -62,6 +62,18 @@ fn build_filter(
     }
 }
 
+/// Scale a filter accumulator back to a sample: round, shift out the filter
+/// gain, and saturate to i16 as libav's `av_clip_int16` does.
+#[inline(always)]
+fn round_and_saturate(val: i32) -> i16 {
+    let val = (val + (1 << (FILTER_SHIFT - 1))) >> FILTER_SHIFT;
+    if (val as u32).wrapping_add(32768) > 65535 {
+        ((val >> 31) ^ 32767) as i16
+    } else {
+        val as i16
+    }
+}
+
 pub struct AvResampleContext {
     filter_bank: Vec<i16>,
     filter_length: usize,
@@ -139,6 +151,43 @@ impl AvResampleContext {
         let mut dst_index = 0usize;
 
         while dst_index < dst_size {
+            // Four outputs per pass while all of their input windows are in
+            // bounds; `index` only grows, so checking the last one covers all.
+            if index >= 0 && dst_index + 4 <= dst_size {
+                let mut indices = [0i32; 4];
+                let (mut next_index, mut next_frac) = (index, frac);
+                for slot in &mut indices {
+                    *slot = next_index;
+                    next_frac += dst_incr_frac;
+                    next_index += dst_incr;
+                    if next_frac >= src_incr {
+                        next_frac -= src_incr;
+                        next_index += 1;
+                    }
+                }
+                if (indices[3] >> phase_shift) + filter_length as i32 <= src_size {
+                    // SAFETY: indices[0] >= 0 and indices[3] passed the bound
+                    // check above, so every window lies in src; every phase is
+                    // < phase_count and the bank holds phase_count + 1 filters.
+                    let windows = indices.map(|i| unsafe {
+                        let si = (i >> phase_shift) as usize;
+                        src.get_unchecked(si..si + filter_length)
+                    });
+                    let filters = indices.map(|i| unsafe {
+                        let offset = filter_length * ((i & phase_mask) as usize);
+                        filter_bank.get_unchecked(offset..offset + filter_length)
+                    });
+                    let vals = crate::simd::dot_product_i16_x4(windows, filters);
+                    for (out, val) in dst[dst_index..dst_index + 4].iter_mut().zip(vals) {
+                        *out = round_and_saturate(val);
+                    }
+                    index = next_index;
+                    frac = next_frac;
+                    dst_index += 4;
+                    continue;
+                }
+            }
+
             let filter_offset = filter_length * ((index & phase_mask) as usize);
             let sample_index = index >> phase_shift;
 
@@ -148,12 +197,7 @@ impl AvResampleContext {
                     let si = ((sample_index + i).abs() % src_size) as usize;
                     val += src[si] as i32 * filter_bank[filter_offset + i as usize] as i32;
                 }
-                val = (val + (1 << (FILTER_SHIFT - 1))) >> FILTER_SHIFT;
-                dst[dst_index] = if (val as u32).wrapping_add(32768) > 65535 {
-                    ((val >> 31) ^ 32767) as i16
-                } else {
-                    val as i16
-                };
+                dst[dst_index] = round_and_saturate(val);
             } else if sample_index + filter_length as i32 > src_size {
                 break;
             } else {
@@ -161,16 +205,11 @@ impl AvResampleContext {
                 // src bounds, and filter_offset..filter_offset+filter_length is within
                 // filter_bank bounds (phase < phase_count, bank has phase_count+1 phases).
                 let si = sample_index as usize;
-                let mut val: i32 = crate::simd::dot_product_i16(
+                let val = crate::simd::dot_product_i16(
                     &src[si..si + filter_length],
                     &filter_bank[filter_offset..filter_offset + filter_length],
                 );
-                val = (val + (1 << (FILTER_SHIFT - 1))) >> FILTER_SHIFT;
-                dst[dst_index] = if (val as u32).wrapping_add(32768) > 65535 {
-                    ((val >> 31) ^ 32767) as i16
-                } else {
-                    val as i16
-                };
+                dst[dst_index] = round_and_saturate(val);
             }
 
             frac += dst_incr_frac;
