@@ -57,6 +57,43 @@ fn kernel_benchmarks(c: &mut Criterion) {
         });
     });
 
+    // The FFT of one frame: realfft's 4096-point real transform, and the
+    // 2048-point complex transform it runs before its post-processing pass.
+    let real_fft = realfft::RealFftPlanner::<f32>::new().plan_fft_forward(4096);
+    let mut real_out = real_fft.make_output_vec();
+    let mut real_scratch = real_fft.make_scratch_vec();
+    let frame_f32: Vec<f32> = frame.iter().map(|&s| s as f32).collect();
+    group.bench_function("realfft_forward_4096", |b| {
+        b.iter(|| {
+            // realfft uses its input as scratch, so restore it each time.
+            windowed.copy_from_slice(&frame_f32);
+            real_fft
+                .process_with_scratch(&mut windowed, &mut real_out, &mut real_scratch)
+                .unwrap();
+            real_out[17]
+        });
+    });
+    let complex_fft = rustfft::FftPlanner::<f32>::new().plan_fft_forward(2048);
+    let mut complex_in: Vec<rustfft::num_complex::Complex<f32>> = frame[..2048]
+        .iter()
+        .map(|&s| rustfft::num_complex::Complex::new(s as f32, -(s as f32)))
+        .collect();
+    let mut complex_out = complex_in.clone();
+    let mut complex_scratch =
+        vec![rustfft::num_complex::Complex::default(); complex_fft.get_outofplace_scratch_len()];
+    group.bench_function("rustfft_complex_2048", |b| {
+        let original = complex_in.clone();
+        b.iter(|| {
+            complex_in.copy_from_slice(&original);
+            complex_fft.process_outofplace_with_scratch(
+                &mut complex_in,
+                &mut complex_out,
+                &mut complex_scratch,
+            );
+            complex_out[17]
+        });
+    });
+
     // Resampling alone, without channel mixing or filter bank construction.
     let input = generate_synthetic_audio(30.0, 44100);
     for in_rate in [44100, 48000] {
