@@ -18,6 +18,9 @@ pub struct AudioProcessor {
     buffer_offset: usize,
     resample_buffer: Vec<i16>,
     resample_ctx: Option<AvResampleContext>,
+    /// Samples of an incomplete frame at the end of the last `consume` call,
+    /// completed by the next one, as C chromaprint does since v1.6.2.
+    leftover: Vec<i16>,
 }
 
 impl AudioProcessor {
@@ -29,6 +32,7 @@ impl AudioProcessor {
             buffer_offset: 0,
             resample_buffer: vec![0i16; MAX_BUFFER_SIZE],
             resample_ctx: None,
+            leftover: Vec::new(),
         }
     }
 
@@ -43,6 +47,8 @@ impl AudioProcessor {
 
         self.num_channels = num_channels;
         self.buffer_offset = 0;
+        self.leftover.clear();
+        self.leftover.reserve(num_channels as usize);
 
         if sample_rate != self.target_sample_rate {
             self.resample_ctx = Some(AvResampleContext::new(
@@ -62,7 +68,34 @@ impl AudioProcessor {
 
     /// Process interleaved multi-channel i16 samples.
     /// Mixes to mono, optionally resamples, and calls the callback with mono samples.
-    pub fn consume<F>(&mut self, input: &[i16], mut callback: F)
+    ///
+    /// `input` need not hold whole frames: an incomplete frame at the end is
+    /// kept and completed by the next call. One still incomplete at `flush` is
+    /// dropped, and `reset` discards it.
+    pub fn consume<F>(&mut self, mut input: &[i16], mut callback: F)
+    where
+        F: FnMut(&[i16]),
+    {
+        let num_channels = self.num_channels as usize;
+        if !self.leftover.is_empty() {
+            let missing = (num_channels - self.leftover.len()).min(input.len());
+            self.leftover.extend_from_slice(&input[..missing]);
+            input = &input[missing..];
+            if self.leftover.len() < num_channels {
+                return;
+            }
+            let frame = std::mem::take(&mut self.leftover);
+            self.consume_frames(&frame, &mut callback);
+            self.leftover = frame;
+            self.leftover.clear();
+        }
+        let (frames, partial) = input.split_at(input.len() - input.len() % num_channels);
+        self.consume_frames(frames, &mut callback);
+        self.leftover.extend_from_slice(partial);
+    }
+
+    /// `consume` for input holding whole frames only.
+    fn consume_frames<F>(&mut self, input: &[i16], callback: &mut F)
     where
         F: FnMut(&[i16]),
     {
@@ -108,7 +141,7 @@ impl AudioProcessor {
             remaining -= to_load;
 
             if self.buffer_offset == self.buffer.len() {
-                self.resample_and_emit(&mut callback);
+                self.resample_and_emit(callback);
                 if self.buffer_offset == self.buffer.len() {
                     // Resample didn't consume anything — shouldn't happen, but prevent infinite loop
                     return;
@@ -155,6 +188,57 @@ impl AudioProcessor {
         } else {
             callback(&self.buffer[..self.buffer_offset]);
             self.buffer_offset = 0;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every mono sample `AudioProcessor` emits for `input` fed in `chunks`
+    /// (cycled), followed by a flush.
+    fn mono_output(input: &[i16], sample_rate: u32, num_channels: u16, chunks: &[usize]) -> Vec<i16> {
+        let mut processor = AudioProcessor::new(11025);
+        processor.reset(sample_rate, num_channels).unwrap();
+        let mut out = Vec::new();
+        let mut pos = 0;
+        for &size in chunks.iter().cycle() {
+            if pos == input.len() {
+                break;
+            }
+            let end = (pos + size).min(input.len());
+            processor.consume(&input[pos..end], |s| out.extend_from_slice(s));
+            pos = end;
+        }
+        processor.flush(|s| out.extend_from_slice(s));
+        out
+    }
+
+    #[test]
+    fn output_does_not_depend_on_chunking() {
+        let mut state = 0xD1B5_4A32_D192_ED03u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for num_channels in 1..=6u16 {
+            for sample_rate in [11025, 44100, 48000] {
+                // Not a whole number of frames, so the stream ends mid-frame.
+                let input: Vec<i16> = (0..100_000 + 3).map(|_| next() as i16).collect();
+                let whole = mono_output(&input, sample_rate, num_channels, &[input.len()]);
+                assert!(!whole.is_empty());
+                for _ in 0..8 {
+                    let chunks: Vec<usize> = (0..16).map(|_| 1 + (next() % 5000) as usize).collect();
+                    let chunked = mono_output(&input, sample_rate, num_channels, &chunks);
+                    assert!(
+                        chunked == whole,
+                        "{num_channels} ch at {sample_rate} Hz differs for chunks {chunks:?}"
+                    );
+                }
+            }
         }
     }
 }

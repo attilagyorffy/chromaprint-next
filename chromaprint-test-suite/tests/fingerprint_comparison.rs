@@ -243,3 +243,124 @@ fn test_resampler_filter_lengths() {
         assert_eq!(c_encoded, rs_encoded, "{sample_rate} Hz: encoded fingerprints differ");
     }
 }
+
+/// Feed `data` to both implementations in the given chunk sizes (cycled until
+/// the data runs out) and return (C raw, Rust raw).
+fn fingerprint_both_chunked(
+    data: &[i16],
+    sample_rate: i32,
+    num_channels: i32,
+    chunk_sizes: &[usize],
+) -> (Vec<u32>, Vec<u32>) {
+    let c_ctx = CChromaprint::new(ALGORITHM_TEST2);
+    c_ctx.start(sample_rate, num_channels);
+    let mut rs_ctx = Fingerprinter::new(Algorithm::Test2);
+    rs_ctx.start(sample_rate as u32, num_channels as u16).unwrap();
+
+    let mut pos = 0;
+    for &size in chunk_sizes.iter().cycle() {
+        if pos == data.len() {
+            break;
+        }
+        let end = (pos + size).min(data.len());
+        c_ctx.feed(&data[pos..end]);
+        rs_ctx.feed(&data[pos..end]).unwrap();
+        pos = end;
+    }
+    c_ctx.finish();
+    rs_ctx.finish().unwrap();
+    (c_ctx.get_raw_fingerprint(), rs_ctx.fingerprint().to_vec())
+}
+
+/// 20 s of the stereo test clip, repeated, so every chunking yields a fingerprint.
+fn stereo_20s() -> Vec<i16> {
+    let clip = load_raw_audio("test_stereo_44100.raw");
+    clip.iter().copied().cycle().take(44100 * 2 * 20).collect()
+}
+
+#[test]
+fn test_chunks_splitting_multichannel_frames() {
+    // Since v1.6.2 the C library carries a partial frame over to the next
+    // feed call, so a frame split across chunks is still mixed as one frame.
+    let data = stereo_20s();
+    let chunkings: [&[usize]; 7] = [&[1], &[3], &[333], &[1001], &[4095], &[4096], &[1, 2, 997, 5, 4093, 7]];
+    for chunks in chunkings {
+        let (c_raw, rs_raw) = fingerprint_both_chunked(&data, 44100, 2, chunks);
+        assert!(!c_raw.is_empty());
+        compare_fingerprints(&format!("stereo chunks {chunks:?}"), &c_raw, &rs_raw);
+    }
+
+    // More than two channels takes a separate mixing path.
+    for chunks in [&[1000usize][..], &[1001], &[2, 7, 1999]] {
+        let (c_raw, rs_raw) = fingerprint_both_chunked(&data, 44100, 3, chunks);
+        assert!(!c_raw.is_empty());
+        compare_fingerprints(&format!("3 channels chunks {chunks:?}"), &c_raw, &rs_raw);
+    }
+
+    // Mono never splits a frame; it must stay unaffected.
+    let (c_raw, rs_raw) = fingerprint_both_chunked(&data, 44100, 1, &[333, 1001]);
+    compare_fingerprints("mono chunks [333, 1001]", &c_raw, &rs_raw);
+}
+
+#[test]
+fn test_trailing_partial_frame() {
+    // A stream whose length is not a whole number of frames: both drop the
+    // incomplete last frame.
+    let mut data = stereo_20s();
+    data.push(12345);
+    let (c_raw, rs_raw) = fingerprint_both_chunked(&data, 44100, 2, &[1001]);
+    compare_fingerprints("trailing partial frame", &c_raw, &rs_raw);
+}
+
+#[test]
+fn test_restart_discards_partial_frame() {
+    // A stream that ends on a partial frame, then a restart: the partial
+    // frame must not leak into the next stream.
+    let data = stereo_20s();
+    let first = &data[..44100 * 2 * 5 + 1];
+
+    let c_ctx = CChromaprint::new(ALGORITHM_TEST2);
+    let mut rs_ctx = Fingerprinter::new(Algorithm::Test2);
+    for ctx_start in 0..2 {
+        c_ctx.start(44100, 2);
+        rs_ctx.start(44100, 2).unwrap();
+        let stream = if ctx_start == 0 { first } else { &data[..] };
+        for part in stream.chunks(1001) {
+            c_ctx.feed(part);
+            rs_ctx.feed(part).unwrap();
+        }
+        if ctx_start == 1 {
+            c_ctx.finish();
+            rs_ctx.finish().unwrap();
+        }
+    }
+    let c_raw = c_ctx.get_raw_fingerprint();
+    assert!(!c_raw.is_empty());
+    compare_fingerprints("restart after partial frame", &c_raw, rs_ctx.fingerprint());
+}
+
+#[test]
+fn test_random_chunkings_match_c() {
+    // Only the fingerprint has to match C; this sweeps the chunk sizes,
+    // channel counts and input rates (integer and fractional resampling
+    // ratios, and no resampling) that callers can produce.
+    let clip = load_raw_audio("test_stereo_44100.raw");
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for num_channels in [1, 2, 3, 6] {
+        for sample_rate in [11025, 22050, 44100, 48000] {
+            // 12 s of audio, plus a few samples so the stream ends mid-frame.
+            let len = sample_rate as usize * num_channels as usize * 12 + 5;
+            let data: Vec<i16> = clip.iter().copied().cycle().take(len).collect();
+            let chunks: Vec<usize> = (0..64).map(|_| 1 + (next() % 9000) as usize).collect();
+            let (c_raw, rs_raw) = fingerprint_both_chunked(&data, sample_rate, num_channels, &chunks);
+            assert!(!c_raw.is_empty(), "{num_channels} ch at {sample_rate} Hz: empty C fingerprint");
+            compare_fingerprints(&format!("{num_channels} ch at {sample_rate} Hz, random chunks"), &c_raw, &rs_raw);
+        }
+    }
+}
