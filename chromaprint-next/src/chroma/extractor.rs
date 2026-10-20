@@ -89,3 +89,85 @@ fn freq_to_index(freq: f64, frame_size: usize, sample_rate: u32) -> usize {
 fn freq_to_octave(freq: f64) -> f64 {
     (freq / BASE_FREQ).ln() / std::f64::consts::LN_2
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{MAX_FREQ, MIN_FREQ};
+
+    /// The per-bin loop as ported from C (`chroma.cpp`), kept as the reference
+    /// that any faster `extract` must match bit for bit.
+    fn extract_reference(ex: &ChromaExtractor, frame: &[f32]) -> ChromaVector {
+        let mut features = [0.0f64; NUM_BANDS];
+        #[allow(clippy::needless_range_loop)] // index shared across notes/notes_frac/frame
+        for i in ex.min_index..ex.max_index {
+            let note = ex.notes[i] as usize;
+            let energy = frame[i] as f64;
+            if ex.interpolate {
+                let frac = ex.notes_frac[i];
+                let mut note2 = note;
+                let mut a: f64 = 1.0;
+                if frac < 0.5 {
+                    note2 = (note + NUM_BANDS - 1) % NUM_BANDS;
+                    a = 0.5 + frac;
+                } else if frac > 0.5 {
+                    note2 = (note + 1) % NUM_BANDS;
+                    a = 1.5 - frac;
+                }
+                features[note] += energy * a;
+                features[note2] += energy * (1.0 - a);
+            } else {
+                features[note] += energy;
+            }
+        }
+        features
+    }
+
+    /// Power-spectrum-like frames: non-negative, spanning ~24 orders of
+    /// magnitude so that summation order affects the rounded result.
+    fn random_frames(frame_size: usize, count: usize) -> Vec<Vec<f32>> {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        (0..count)
+            .map(|_| {
+                (0..frame_size / 2 + 1)
+                    .map(|_| {
+                        let mantissa = (next() >> 40) as f32 / (1u64 << 24) as f32;
+                        let exponent = (next() % 25) as i32 - 6;
+                        match next() % 16 {
+                            0 => 0.0,
+                            _ => mantissa * 10f32.powi(exponent),
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn extract_matches_reference_bit_for_bit() {
+        // The algorithms' configuration first, then other frame sizes and rates,
+        // which change how many consecutive bins map to the same note.
+        for (frame_size, sample_rate) in [(4096, 11025), (2048, 11025), (4096, 8000), (8192, 44100)] {
+            for interpolate in [false, true] {
+                let ex = ChromaExtractor::new(MIN_FREQ, MAX_FREQ, frame_size, sample_rate, interpolate);
+                for (n, frame) in random_frames(frame_size, 64).iter().enumerate() {
+                    let got = ex.extract(frame);
+                    let want = extract_reference(&ex, frame);
+                    for band in 0..NUM_BANDS {
+                        assert_eq!(
+                            got[band].to_bits(),
+                            want[band].to_bits(),
+                            "frame_size={frame_size} rate={sample_rate} interpolate={interpolate} frame={n} band={band}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
