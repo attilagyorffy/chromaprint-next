@@ -41,9 +41,9 @@ pub enum Stage {
     Resample,
     /// Hamming window applied to one frame.
     FftWindow,
-    /// Real FFT of one frame.
+    /// Half-length complex FFT of one frame.
     Fft,
-    /// `re² + im²` over one FFT output frame.
+    /// Real-FFT twiddle pass fused with `re² + im²`.
     PowerSpectrum,
     /// Power spectrum to 12 chroma bands.
     ChromaExtract,

@@ -1,4 +1,5 @@
-#[cfg(not(target_arch = "aarch64"))]
+// On aarch64 only the real-FFT tail is used from here.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
 mod scalar;
 
 #[cfg(target_arch = "aarch64")]
@@ -114,6 +115,37 @@ pub fn stereo_to_mono(input: &[i16], output: &mut [i16]) {
     }
 }
 
+/// The twiddle pass of a real FFT (realfft's `RealToComplexEven`), writing
+/// power instead of complex bins.
+///
+/// `x` is the half-length complex FFT of the frame as interleaved `re, im`
+/// pairs (`n = x.len() / 2` bins). For each `k` in `1..=twiddles_re.len()` it
+/// combines bins `k` and `n - k` into output bins `k` and `n - k` exactly as
+/// realfft does, and stores `re * re + im * im` of each in `power`. Plain
+/// multiplies and adds in realfft's order (no fused multiply-add), so SIMD and
+/// scalar results are bit-identical.
+///
+/// # Panics
+/// Panics if the twiddle slices differ in length, if they do not satisfy
+/// `2 * (len + 1) <= n`, or if `power` is shorter than `n + 1`.
+#[inline]
+pub fn real_fft_power_pairs(x: &[f32], twiddles_re: &[f32], twiddles_im: &[f32], power: &mut [f32]) {
+    let n = x.len() / 2;
+    assert_eq!(twiddles_re.len(), twiddles_im.len(), "real_fft_power_pairs: twiddle length mismatch");
+    assert!(2 * (twiddles_re.len() + 1) <= n, "real_fft_power_pairs: too many twiddles");
+    assert!(power.len() > n, "real_fft_power_pairs: power too short");
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        neon::real_fft_power_pairs(x, twiddles_re, twiddles_im, power)
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        scalar::real_fft_power_pairs(x, twiddles_re, twiddles_im, power, 1)
+    }
+}
+
 /// Convert i16 samples to f32 and multiply by window coefficients.
 ///
 /// output[i] = input[i] as f32 * window[i]
@@ -223,6 +255,26 @@ mod tests {
     fn dot_product_x4_length_mismatch_panics() {
         let x = [1i16, 2, 3];
         dot_product_i16_x4([&x, &x, &x[..2], &x], [&x, &x, &x, &x]);
+    }
+
+    #[test]
+    fn real_fft_power_pairs_matches_scalar() {
+        // The scalar pass is the whole implementation off aarch64 and the
+        // tail on it; compare it from bin 1 with the dispatched version.
+        let mut rng = Rng(0x3C6E_F372_FE94_F82B);
+        for n in [4usize, 8, 12, 16, 20, 24, 64, 2048] {
+            let pairs = n / 2 - 1;
+            let x: Vec<f32> = (0..2 * n).map(|_| rng.i16() as f32 * 1.37).collect();
+            let tw_re: Vec<f32> = (0..pairs).map(|_| rng.i16() as f32 / 65536.0).collect();
+            let tw_im: Vec<f32> = (0..pairs).map(|_| rng.i16() as f32 / 65536.0).collect();
+            let mut want = vec![f32::NAN; n + 1];
+            scalar::real_fft_power_pairs(&x, &tw_re, &tw_im, &mut want, 1);
+            let mut got = vec![f32::NAN; n + 1];
+            real_fft_power_pairs(&x, &tw_re, &tw_im, &mut got);
+            for k in (1..=pairs).flat_map(|k| [k, n - k]) {
+                assert_eq!(got[k].to_bits(), want[k].to_bits(), "n={n} bin={k}");
+            }
+        }
     }
 
     #[test]

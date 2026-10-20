@@ -1,8 +1,7 @@
+pub mod real;
 pub mod window;
 
-use realfft::RealFftPlanner;
-use realfft::RealToComplex;
-use std::sync::Arc;
+use real::RealPowerFft;
 
 /// Round up to the next power of two.
 fn next_power_of_two(n: usize) -> usize {
@@ -21,10 +20,8 @@ pub struct FftProcessor {
     ring_read: usize,
     ring_count: usize,
     // FFT state
-    fft: Arc<dyn RealToComplex<f32>>,
+    fft: RealPowerFft,
     fft_input: Vec<f32>,
-    fft_scratch: Vec<realfft::num_complex::Complex<f32>>,
-    fft_output: Vec<realfft::num_complex::Complex<f32>>,
     // Power spectrum output
     power_spectrum: Vec<f32>,
 }
@@ -34,12 +31,8 @@ impl FftProcessor {
         let increment = frame_size - frame_overlap;
         let window = window::hamming(frame_size);
 
-        let mut planner = RealFftPlanner::<f32>::new();
-        let fft = planner.plan_fft_forward(frame_size);
-
+        let fft = RealPowerFft::new(frame_size);
         let fft_input = vec![0.0f32; frame_size];
-        let fft_output = fft.make_output_vec();
-        let fft_scratch = fft.make_scratch_vec();
         let power_spectrum = vec![0.0f32; frame_size / 2 + 1];
 
         // Power-of-2 ring buffer for bitmask indexing
@@ -56,8 +49,6 @@ impl FftProcessor {
             ring_count: 0,
             fft,
             fft_input,
-            fft_scratch,
-            fft_output,
             power_spectrum,
         }
     }
@@ -128,25 +119,14 @@ impl FftProcessor {
             );
         }
 
-        // Compute real FFT
-        {
-            profile_stage!(Fft);
-            self.fft
-                .process_with_scratch(&mut self.fft_input, &mut self.fft_output, &mut self.fft_scratch)
-                .expect("FFT computation failed");
-        }
-
-        // Compute power spectrum: |X[k]|^2 = re^2 + im^2
-        profile_stage!(PowerSpectrum);
-        for (i, c) in self.fft_output.iter().enumerate() {
-            self.power_spectrum[i] = c.re * c.re + c.im * c.im;
-        }
+        self.fft.process(&mut self.fft_input, &mut self.power_spectrum);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use realfft::RealFftPlanner;
 
     /// Frames cut straight from the input, windowed per element, transformed and
     /// squared one by one: what the ring buffer must reproduce bit for bit.

@@ -147,6 +147,66 @@ pub fn dot_product_i16_x4(a: [&[i16]; 4], b: [&[i16]; 4]) -> [i32; 4] {
     }
 }
 
+/// Reverse the four lanes of a vector.
+#[inline(always)]
+unsafe fn reverse_f32x4(v: float32x4_t) -> float32x4_t {
+    let pairs_swapped = vrev64q_f32(v);
+    vextq_f32::<2>(pairs_swapped, pairs_swapped)
+}
+
+/// NEON twiddle pass of a real FFT, four bin pairs per iteration; see
+/// `simd::real_fft_power_pairs`.
+///
+/// Bins `k..k + 4` load directly; their partners `n - k - 3..=n - k` load
+/// as one block and are lane-reversed. Only `vaddq`/`vsubq`/`vmulq` are used,
+/// in the scalar order, never `vfmaq`, so results are bit-identical.
+#[inline]
+pub fn real_fft_power_pairs(x: &[f32], twiddles_re: &[f32], twiddles_im: &[f32], power: &mut [f32]) {
+    let n = x.len() / 2;
+    let pairs = twiddles_re.len();
+    debug_assert!(2 * (pairs + 1) <= n && power.len() > n && twiddles_im.len() == pairs);
+
+    let mut k = 1;
+    // SAFETY: k + 3 <= pairs < n / 2, so bins k..k+4 and n-k-3..=n-k are
+    // within the n bins of x, twiddles k-1..k+3 within the twiddle slices,
+    // and power indices within power.len() > n (asserted by the caller).
+    unsafe {
+        let x_ptr = x.as_ptr();
+        let p_ptr = power.as_mut_ptr();
+        let half = vdupq_n_f32(0.5);
+        while k + 3 <= pairs {
+            let tw_re = vld1q_f32(twiddles_re.as_ptr().add(k - 1));
+            let tw_im = vld1q_f32(twiddles_im.as_ptr().add(k - 1));
+            let out = vld2q_f32(x_ptr.add(2 * k));
+            let rev = vld2q_f32(x_ptr.add(2 * (n - k - 3)));
+            let (out_re, out_im) = (out.0, out.1);
+            let (rev_re, rev_im) = (reverse_f32x4(rev.0), reverse_f32x4(rev.1));
+
+            let sum_re = vaddq_f32(out_re, rev_re);
+            let sum_im = vaddq_f32(out_im, rev_im);
+            let diff_re = vsubq_f32(out_re, rev_re);
+            let diff_im = vsubq_f32(out_im, rev_im);
+            let twiddled_re = vaddq_f32(vmulq_f32(sum_im, tw_re), vmulq_f32(diff_re, tw_im));
+            let twiddled_im = vsubq_f32(vmulq_f32(sum_im, tw_im), vmulq_f32(diff_re, tw_re));
+            let half_sum_re = vmulq_f32(half, sum_re);
+            let half_diff_im = vmulq_f32(half, diff_im);
+
+            let re = vaddq_f32(half_sum_re, twiddled_re);
+            let im = vaddq_f32(half_diff_im, twiddled_im);
+            vst1q_f32(p_ptr.add(k), vaddq_f32(vmulq_f32(re, re), vmulq_f32(im, im)));
+
+            let re = vsubq_f32(half_sum_re, twiddled_re);
+            let im = vsubq_f32(twiddled_im, half_diff_im);
+            let rev_power = vaddq_f32(vmulq_f32(re, re), vmulq_f32(im, im));
+            vst1q_f32(p_ptr.add(n - k - 3), reverse_f32x4(rev_power));
+
+            k += 4;
+        }
+    }
+
+    super::scalar::real_fft_power_pairs(x, twiddles_re, twiddles_im, power, k);
+}
+
 /// NEON-accelerated stereo-to-mono mixing.
 ///
 /// Deinterleaves stereo pairs with `vld2q_s16`, widens to i32, averages

@@ -28,6 +28,10 @@ name = "profile_stages"
 required-features = ["profiling"]
 
 [dependencies]
-realfft = "3"
+rustfft = "6"
 rayon = { version = "1", optional = true }
 thiserror = "2"
+
+[dev-dependencies]
+# Reference for the fused real FFT in `fft::real`.
+realfft = "3"
