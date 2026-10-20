@@ -19,6 +19,13 @@ name = "chromaprint"
 [features]
 default = []
 parallel = ["dep:rayon"]
+# Per-stage timing via `chromaprint::profile`. Adds a timer around each stage;
+# leave it off for production builds.
+profiling = []
+
+[[example]]
+name = "profile_stages"
+required-features = ["profiling"]
 
 [dependencies]
 realfft = "3"

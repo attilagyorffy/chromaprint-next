@@ -16,6 +16,15 @@
 //! let encoded = fp.encode();
 //! ```
 
+/// Time the rest of the enclosing block against a `profile::Stage`.
+/// Expands to nothing unless the `profiling` feature is enabled.
+macro_rules! profile_stage {
+    ($stage:ident) => {
+        #[cfg(feature = "profiling")]
+        let _profile_span = $crate::profile::Span::new($crate::profile::Stage::$stage);
+    };
+}
+
 pub mod audio;
 pub mod chroma;
 pub mod codec;
@@ -24,6 +33,8 @@ pub mod error;
 pub mod fft;
 pub mod fingerprint;
 pub mod pipeline;
+#[cfg(feature = "profiling")]
+pub mod profile;
 pub mod simd;
 pub mod types;
 

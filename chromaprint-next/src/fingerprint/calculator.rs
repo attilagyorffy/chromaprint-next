@@ -40,6 +40,7 @@ impl FingerprintCalculator {
             return;
         }
 
+        profile_stage!(Classify);
         let offset = self.image.num_rows() - self.max_filter_width;
         let mut bits: u32 = 0;
 

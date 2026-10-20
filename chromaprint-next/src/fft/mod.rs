@@ -114,6 +114,7 @@ impl FftProcessor {
         let end = ring_read + self.frame_size;
         if end <= ring_mask + 1 {
             // Contiguous: no wrapping needed — use SIMD
+            profile_stage!(FftWindow);
             crate::simd::window_apply(
                 &self.ring_buffer[ring_read..ring_read + self.frame_size],
                 &self.window,
@@ -121,6 +122,7 @@ impl FftProcessor {
             );
         } else {
             // Wrapping: apply mask per element
+            profile_stage!(FftWindow);
             for i in 0..self.frame_size {
                 let ring_idx = (ring_read + i) & ring_mask;
                 self.fft_input[i] = self.ring_buffer[ring_idx] as f32 * self.window[i];
@@ -128,11 +130,15 @@ impl FftProcessor {
         }
 
         // Compute real FFT
-        self.fft
-            .process_with_scratch(&mut self.fft_input, &mut self.fft_output, &mut self.fft_scratch)
-            .expect("FFT computation failed");
+        {
+            profile_stage!(Fft);
+            self.fft
+                .process_with_scratch(&mut self.fft_input, &mut self.fft_output, &mut self.fft_scratch)
+                .expect("FFT computation failed");
+        }
 
         // Compute power spectrum: |X[k]|^2 = re^2 + im^2
+        profile_stage!(PowerSpectrum);
         for (i, c) in self.fft_output.iter().enumerate() {
             self.power_spectrum[i] = c.re * c.re + c.im * c.im;
         }

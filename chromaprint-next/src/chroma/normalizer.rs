@@ -6,6 +6,7 @@ const NORM_THRESHOLD: f64 = 0.01;
 /// If the norm is below the threshold, the vector is zeroed out.
 #[inline]
 pub fn normalize(features: &mut ChromaVector) {
+    profile_stage!(Normalize);
     let mut sum_sq: f64 = 0.0;
     for &f in features.iter() {
         sum_sq += f * f;

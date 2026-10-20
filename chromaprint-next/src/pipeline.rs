@@ -23,6 +23,7 @@ pub struct Pipeline {
 
 impl Pipeline {
     pub fn new(algorithm: Algorithm) -> Self {
+        profile_stage!(Setup);
         let cfg = config::get_config(algorithm);
 
         let audio_processor = AudioProcessor::new(cfg.sample_rate);
@@ -54,6 +55,7 @@ impl Pipeline {
     }
 
     pub fn start(&mut self, sample_rate: u32, num_channels: u16) -> Result<()> {
+        profile_stage!(Setup);
         self.audio_processor.reset(sample_rate, num_channels)?;
         if let Some(ref mut sr) = self.silence_remover {
             sr.reset();

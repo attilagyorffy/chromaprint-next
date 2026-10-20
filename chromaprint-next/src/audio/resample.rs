@@ -125,6 +125,7 @@ impl AvResampleContext {
         consumed: &mut usize,
         dst_size: usize,
     ) -> usize {
+        profile_stage!(Resample);
         let src_size = src.len() as i32;
         let filter_length = self.filter_length;
         let filter_bank = &self.filter_bank;

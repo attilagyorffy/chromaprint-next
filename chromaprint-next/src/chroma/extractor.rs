@@ -43,6 +43,7 @@ impl ChromaExtractor {
     /// Extract chroma features from an FFT power spectrum frame.
     #[inline]
     pub fn extract(&self, frame: &[f32]) -> ChromaVector {
+        profile_stage!(ChromaExtract);
         let mut features = [0.0f64; NUM_BANDS];
 
         #[allow(clippy::needless_range_loop)] // index shared across notes/notes_frac/frame
