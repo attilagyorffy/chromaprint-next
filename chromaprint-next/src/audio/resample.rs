@@ -178,6 +178,27 @@ impl AvResampleContext {
         dst_size: usize,
     ) -> usize {
         profile_stage!(Resample);
+        // With an integer rate ratio (22.05, 44.1, 88.2 kHz input to 11025 Hz)
+        // `frac` never moves and every step is a whole number of input samples,
+        // so the filter phase stays the same for the whole call. Each case gets
+        // its own copy of the loop with only the kernel it uses.
+        let constant_phase =
+            self.dst_incr % self.src_incr == 0 && (self.dst_incr / self.src_incr) & self.phase_mask == 0;
+        if constant_phase {
+            self.resample_with::<true>(dst, src, consumed, dst_size)
+        } else {
+            self.resample_with::<false>(dst, src, consumed, dst_size)
+        }
+    }
+
+    #[inline(always)]
+    fn resample_with<const CONSTANT_PHASE: bool>(
+        &mut self,
+        dst: &mut [i16],
+        src: &[i16],
+        consumed: &mut usize,
+        dst_size: usize,
+    ) -> usize {
         let src_size = src.len() as i32;
         let filter_length = self.filter_length;
         let filter_bank = &self.filter_bank;
@@ -213,11 +234,15 @@ impl AvResampleContext {
                         let si = (i >> phase_shift) as usize;
                         src.get_unchecked(si..si + filter_length)
                     });
-                    let filters = indices.map(|i| unsafe {
+                    let filter = |i: i32| unsafe {
                         let offset = filter_length * ((i & phase_mask) as usize);
                         filter_bank.get_unchecked(offset..offset + filter_length)
-                    });
-                    let vals = crate::simd::dot_product_i16_x4(windows, filters);
+                    };
+                    let vals = if CONSTANT_PHASE {
+                        crate::simd::dot_product_i16_x4_shared(windows, filter(indices[0]))
+                    } else {
+                        crate::simd::dot_product_i16_x4(windows, indices.map(filter))
+                    };
                     for (out, val) in dst[dst_index..dst_index + 4].iter_mut().zip(vals) {
                         *out = round_and_saturate(val);
                     }
