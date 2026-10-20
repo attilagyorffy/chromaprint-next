@@ -2,7 +2,7 @@
 
 chromaprint-next is a pure-Rust port of the [C/C++ Chromaprint library](https://github.com/acoustid/chromaprint), producing **bit-identical fingerprints** for all five algorithm variants (TEST1 through TEST5) when given the same PCM input. This is verified by the `chromaprint-test-suite` workspace crate, which links both the C library (via FFI) and the Rust crate, feeding identical audio through both and asserting equality of raw fingerprints, compressed base64 strings, and SimHash values.
 
-When updating the C reference implementation, re-run the cross-implementation test suite (`cargo test -p chromaprint-test-suite`) and check that all tests still pass.
+When updating the C reference implementation, re-run the cross-implementation test suite (`cargo test -p chromaprint-test-suite`) and check that all tests still pass. The build scripts rebuild the C library when its sources change; read the upstream changelog too, since behaviour the tests do not exercise (such as how partial frames were handled before v1.6.2) can change without a test failing.
 
 ## Pipeline architecture
 
@@ -33,11 +33,11 @@ Each stage is matched component-by-component against the C implementation.
 
 ### Resampler
 
-The C library bundles FFmpeg's `av_resample` polyphase FIR resampler (`avresample/resample2.c`). The Rust port (`audio/resample.rs`) is a direct translation of this code: Kaiser-windowed sinc filter (beta=9), 16 taps, 256 phases, fixed-point i16 arithmetic with 15-bit shift, identical filter bank construction and rational-arithmetic output stepping. The startup transient handling (cyclic reflection for negative indices) and saturation clamping logic are reproduced exactly.
+The C library bundles FFmpeg's `av_resample` polyphase FIR resampler (`avresample/resample2.c`). The Rust port (`audio/resample.rs`) is a direct translation of this code: Kaiser-windowed sinc filter (beta=9), filter size 16 (80 taps for 44.1 kHz input, longer for higher rates), 256 phases, fixed-point i16 arithmetic with 15-bit shift, identical filter bank construction and rational-arithmetic output stepping. The startup transient handling (cyclic reflection for negative indices) and saturation clamping logic are reproduced exactly.
 
 ### Audio processor
 
-Channel mixing uses integer averaging (`(L+R)/2` for stereo, `sum/N` for multi-channel). The 32 KiB accumulation buffer, resampling trigger, and unconsumed-sample preservation all match the C `AudioProcessor` behavior.
+Channel mixing uses integer averaging (`(L+R)/2` for stereo, `sum/N` for multi-channel). Input chunks need not hold whole frames: as in C chromaprint since v1.6.2, an incomplete frame at the end of a chunk is completed by the next one, dropped if the stream ends first, and discarded by `start`. The resulting fingerprints match C for any chunking, which the test suite checks with fixed and randomized chunk sizes across channel counts and input rates. The 32 KiB accumulation buffer, resampling trigger, and unconsumed-sample preservation produce the same mono stream as the C `AudioProcessor`.
 
 ### FFT
 
@@ -100,7 +100,7 @@ Explicit SIMD (`simd` module: NEON on aarch64, SSE2 on x86/x86_64, scalar elsewh
 
 ### Parallelism
 
-The optional `parallel` feature (gated behind the `rayon` dependency) provides `fingerprint_batch`, which processes multiple independent audio buffers concurrently via `rayon::par_iter`. Each task creates its own `Fingerprinter` with no shared mutable state, so there is no contention or locking.
+The optional `parallel` feature (gated behind the `rayon` dependency) provides `fingerprint_batch`, which processes multiple independent audio buffers concurrently via `rayon::par_iter`. Each task creates its own `Fingerprinter`. The only shared state is the process-wide resampler filter-bank cache: `start` takes its lock briefly to look up or insert a bank (banks are built outside the lock), and processing never touches it.
 
 ### Arithmetic precision
 
