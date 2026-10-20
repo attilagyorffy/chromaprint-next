@@ -144,3 +144,66 @@ impl FftProcessor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Frames cut straight from the input, windowed per element, transformed and
+    /// squared one by one: what the ring buffer must reproduce bit for bit.
+    fn reference_spectra(samples: &[i16], frame_size: usize, increment: usize) -> Vec<Vec<f32>> {
+        let window = window::hamming(frame_size);
+        let fft = RealFftPlanner::<f32>::new().plan_fft_forward(frame_size);
+        let mut output = fft.make_output_vec();
+        (0..)
+            .map(|k| k * increment)
+            .take_while(|start| start + frame_size <= samples.len())
+            .map(|start| {
+                let mut input: Vec<f32> = samples[start..start + frame_size]
+                    .iter()
+                    .zip(&window)
+                    .map(|(&s, &w)| s as f32 * w)
+                    .collect();
+                fft.process(&mut input, &mut output).unwrap();
+                output.iter().map(|c| c.re * c.re + c.im * c.im).collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn spectra_match_reference_across_ring_wraparound() {
+        let mut state = 0x6A09_E667_F3BC_C909u64;
+        let samples: Vec<i16> = (0..40_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as i16
+            })
+            .collect();
+        // 40,000 samples give 27 frames, and the read position passes the
+        // 16,384-sample ring end twice, so wrapped frames are covered.
+        let expected = reference_spectra(&samples, 4096, 4096 - 2731);
+        assert_eq!(expected.len(), 27);
+
+        // Uneven chunks so frames complete at every offset within a chunk.
+        let mut fft = FftProcessor::new(4096, 2731);
+        let mut got = Vec::new();
+        let mut pos = 0;
+        for chunk in (1..).map(|i| (i * 977) % 5000 + 1) {
+            let end = (pos + chunk).min(samples.len());
+            fft.consume(&samples[pos..end], |s| got.push(s.to_vec()));
+            pos = end;
+            if pos == samples.len() {
+                break;
+            }
+        }
+
+        assert_eq!(got.len(), expected.len());
+        for (n, (g, e)) in got.iter().zip(&expected).enumerate() {
+            let g: Vec<u32> = g.iter().map(|v| v.to_bits()).collect();
+            let e: Vec<u32> = e.iter().map(|v| v.to_bits()).collect();
+            assert!(g == e, "frame {n} differs");
+        }
+    }
+}

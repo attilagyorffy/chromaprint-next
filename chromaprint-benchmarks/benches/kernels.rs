@@ -44,6 +44,19 @@ fn kernel_benchmarks(c: &mut Criterion) {
         });
     }
 
+    // Windowing one FFT frame: i16 samples to f32 times the Hamming window.
+    let frame: Vec<i16> = audio[..4096].to_vec();
+    let window: Vec<f32> = (0..4096)
+        .map(|i| 0.54 - 0.46 * (2.0 * std::f32::consts::PI * i as f32 / 4095.0).cos())
+        .collect();
+    let mut windowed = vec![0.0f32; 4096];
+    group.bench_function("window_apply_4096", |b| {
+        b.iter(|| {
+            simd::window_apply(std::hint::black_box(&frame), &window, &mut windowed);
+            windowed[17]
+        });
+    });
+
     // Resampling alone, without channel mixing or filter bank construction.
     let input = generate_synthetic_audio(30.0, 44100);
     for in_rate in [44100, 48000] {
