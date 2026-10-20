@@ -26,6 +26,22 @@ fn kernel_benchmarks(c: &mut Criterion) {
                 acc
             });
         });
+        // The same 1024 windows, four per call.
+        group.bench_function(format!("dot_product_i16_x4_{len}x1024"), |b| {
+            b.iter(|| {
+                let mut acc = 0i32;
+                for start in (0..1024).step_by(4) {
+                    let windows = [0, 1, 2, 3].map(|k| {
+                        let s = (start + k) * 4;
+                        std::hint::black_box(&audio[s..s + len])
+                    });
+                    for v in simd::dot_product_i16_x4(windows, [taps.as_slice(); 4]) {
+                        acc = acc.wrapping_add(v);
+                    }
+                }
+                acc
+            });
+        });
     }
 
     // Resampling alone, without channel mixing or filter bank construction.

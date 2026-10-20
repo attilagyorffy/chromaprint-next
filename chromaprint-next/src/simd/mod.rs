@@ -50,6 +50,33 @@ pub fn dot_product_i16(a: &[i16], b: &[i16]) -> i32 {
     }
 }
 
+/// Four independent dot products of equal length, as [`dot_product_i16`]
+/// computes them one at a time.
+///
+/// Batching lets NEON reduce all four accumulators together instead of paying
+/// a horizontal sum per result. Other targets compute them one by one.
+///
+/// # Panics
+/// Panics if the eight slices do not all have the same length.
+#[inline]
+pub fn dot_product_i16_x4(a: [&[i16]; 4], b: [&[i16]; 4]) -> [i32; 4] {
+    let len = a[0].len();
+    assert!(
+        a.iter().chain(b.iter()).all(|s| s.len() == len),
+        "dot_product_i16_x4: length mismatch"
+    );
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        neon::dot_product_i16_x4(a, b)
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        [0, 1, 2, 3].map(|k| dot_product_i16(a[k], b[k]))
+    }
+}
+
 /// Mix interleaved stereo i16 pairs to mono by averaging.
 ///
 /// `input` has `output.len() * 2` elements (L0,R0,L1,R1,...).
@@ -172,6 +199,30 @@ mod tests {
                 assert_eq!(dot_product_i16(&a, &b), expected, "len={len}");
             }
         }
+    }
+
+    #[test]
+    fn dot_product_x4_matches_single() {
+        let mut rng = Rng(0x0BAD_5EED_1234_5678);
+        for len in 0..=360 {
+            let a: Vec<Vec<i16>> = (0..4).map(|_| gen_i16(&mut rng, len)).collect();
+            let b: Vec<Vec<i16>> = (0..4).map(|_| gen_i16(&mut rng, len)).collect();
+            let a_refs = [0, 1, 2, 3].map(|k| a[k].as_slice());
+            let b_refs = [0, 1, 2, 3].map(|k| b[k].as_slice());
+            let expected = [0, 1, 2, 3].map(|k| {
+                a[k].iter()
+                    .zip(&b[k])
+                    .fold(0i32, |acc, (&x, &y)| acc.wrapping_add(x as i32 * y as i32))
+            });
+            assert_eq!(dot_product_i16_x4(a_refs, b_refs), expected, "len={len}");
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn dot_product_x4_length_mismatch_panics() {
+        let x = [1i16, 2, 3];
+        dot_product_i16_x4([&x, &x, &x[..2], &x], [&x, &x, &x, &x]);
     }
 
     #[test]
