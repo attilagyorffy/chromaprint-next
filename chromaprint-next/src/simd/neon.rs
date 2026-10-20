@@ -2,9 +2,10 @@ use std::arch::aarch64::*;
 
 /// NEON-accelerated i16 × i16 dot product with i32 accumulator.
 ///
-/// Uses `vmlal_s16` (signed multiply-accumulate long) to process
-/// 4 i16 pairs per instruction, with two accumulator chains for
-/// instruction-level parallelism.
+/// Loads 16 i16 pairs per iteration as two 128-bit vectors and feeds four
+/// independent `smlal`/`smlal2` accumulator chains, so the multiply-accumulate
+/// latency is hidden behind the other chains. Integer addition is associative
+/// (wrapping), so the result is identical to the scalar sum.
 #[inline]
 pub fn dot_product_i16(a: &[i16], b: &[i16]) -> i32 {
     debug_assert_eq!(a.len(), b.len());
@@ -16,33 +17,71 @@ pub fn dot_product_i16(a: &[i16], b: &[i16]) -> i32 {
 
         let mut acc0 = vdupq_n_s32(0);
         let mut acc1 = vdupq_n_s32(0);
+        let mut acc2 = vdupq_n_s32(0);
+        let mut acc3 = vdupq_n_s32(0);
 
-        let chunks = len / 8;
+        let mut acc4 = vdupq_n_s32(0);
+        let mut acc5 = vdupq_n_s32(0);
+        let mut acc6 = vdupq_n_s32(0);
+        let mut acc7 = vdupq_n_s32(0);
 
-        for i in 0..chunks {
-            let offset = i * 8;
-            let a_lo = vld1_s16(a_ptr.add(offset));
-            let b_lo = vld1_s16(b_ptr.add(offset));
-            let a_hi = vld1_s16(a_ptr.add(offset + 4));
-            let b_hi = vld1_s16(b_ptr.add(offset + 4));
+        let mut offset = 0;
+        while offset + 32 <= len {
+            let a0 = vld1q_s16(a_ptr.add(offset));
+            let b0 = vld1q_s16(b_ptr.add(offset));
+            let a1 = vld1q_s16(a_ptr.add(offset + 8));
+            let b1 = vld1q_s16(b_ptr.add(offset + 8));
+            let a2 = vld1q_s16(a_ptr.add(offset + 16));
+            let b2 = vld1q_s16(b_ptr.add(offset + 16));
+            let a3 = vld1q_s16(a_ptr.add(offset + 24));
+            let b3 = vld1q_s16(b_ptr.add(offset + 24));
 
-            acc0 = vmlal_s16(acc0, a_lo, b_lo);
-            acc1 = vmlal_s16(acc1, a_hi, b_hi);
+            acc0 = vmlal_s16(acc0, vget_low_s16(a0), vget_low_s16(b0));
+            acc1 = vmlal_high_s16(acc1, a0, b0);
+            acc2 = vmlal_s16(acc2, vget_low_s16(a1), vget_low_s16(b1));
+            acc3 = vmlal_high_s16(acc3, a1, b1);
+            acc4 = vmlal_s16(acc4, vget_low_s16(a2), vget_low_s16(b2));
+            acc5 = vmlal_high_s16(acc5, a2, b2);
+            acc6 = vmlal_s16(acc6, vget_low_s16(a3), vget_low_s16(b3));
+            acc7 = vmlal_high_s16(acc7, a3, b3);
+            offset += 32;
         }
 
-        acc0 = vaddq_s32(acc0, acc1);
+        if len - offset >= 16 {
+            let a0 = vld1q_s16(a_ptr.add(offset));
+            let b0 = vld1q_s16(b_ptr.add(offset));
+            let a1 = vld1q_s16(a_ptr.add(offset + 8));
+            let b1 = vld1q_s16(b_ptr.add(offset + 8));
+            acc4 = vmlal_s16(acc4, vget_low_s16(a0), vget_low_s16(b0));
+            acc5 = vmlal_high_s16(acc5, a0, b0);
+            acc6 = vmlal_s16(acc6, vget_low_s16(a1), vget_low_s16(b1));
+            acc7 = vmlal_high_s16(acc7, a1, b1);
+            offset += 16;
+        }
+        acc0 = vaddq_s32(acc0, acc4);
+        acc1 = vaddq_s32(acc1, acc5);
+        acc2 = vaddq_s32(acc2, acc6);
+        acc3 = vaddq_s32(acc3, acc7);
 
-        // Handle 4-element remainder chunk
-        let mut offset = chunks * 8;
+        // 8-element remainder chunk
+        if len - offset >= 8 {
+            let a0 = vld1q_s16(a_ptr.add(offset));
+            let b0 = vld1q_s16(b_ptr.add(offset));
+            acc0 = vmlal_s16(acc0, vget_low_s16(a0), vget_low_s16(b0));
+            acc1 = vmlal_high_s16(acc1, a0, b0);
+            offset += 8;
+        }
+
+        // 4-element remainder chunk
         if len - offset >= 4 {
             let a_v = vld1_s16(a_ptr.add(offset));
             let b_v = vld1_s16(b_ptr.add(offset));
-            acc0 = vmlal_s16(acc0, a_v, b_v);
+            acc2 = vmlal_s16(acc2, a_v, b_v);
             offset += 4;
         }
 
         // Horizontal sum
-        let mut result = vaddvq_s32(acc0);
+        let mut result = vaddvq_s32(vaddq_s32(vaddq_s32(acc0, acc1), vaddq_s32(acc2, acc3)));
 
         // Scalar tail (0-3 elements)
         for i in 0..(len - offset) {
