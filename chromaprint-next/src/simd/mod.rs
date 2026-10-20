@@ -158,8 +158,10 @@ mod tests {
 
     #[test]
     fn dot_product_matches_reference() {
+        // Covers every resampler filter length from 8 kHz (16 taps) to 192 kHz
+        // (349 taps) input, plus every tail length of the SIMD loops.
         let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-        for len in 0..=67 {
+        for len in 0..=360 {
             for _ in 0..4 {
                 let a = gen_i16(&mut rng, len);
                 let b = gen_i16(&mut rng, len);
