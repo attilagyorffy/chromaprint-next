@@ -19,6 +19,10 @@ fn main() {
     let dst = cfg.build();
 
     println!("cargo:rerun-if-changed=build.rs");
+    // Rebuild the C library when the submodule moves; cargo checks these
+    // paths recursively.
+    println!("cargo:rerun-if-changed=../chromaprint/src");
+    println!("cargo:rerun-if-changed=../chromaprint/CMakeLists.txt");
     println!("cargo:rustc-link-search=native={}/lib", dst.display());
     println!("cargo:rustc-link-lib=static=chromaprint");
 
