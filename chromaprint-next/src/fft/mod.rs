@@ -110,23 +110,22 @@ impl FftProcessor {
         let ring_mask = self.ring_mask;
         let ring_read = self.ring_read;
 
-        // Check if the frame wraps around the ring buffer
-        let end = ring_read + self.frame_size;
-        if end <= ring_mask + 1 {
-            // Contiguous: no wrapping needed — use SIMD
+        // A frame that wraps around the ring end (a quarter of all frames with a
+        // ring four frames long) is windowed as two contiguous pieces.
+        {
             profile_stage!(FftWindow);
+            let first = self.frame_size.min(ring_mask + 1 - ring_read);
             crate::simd::window_apply(
-                &self.ring_buffer[ring_read..ring_read + self.frame_size],
-                &self.window,
-                &mut self.fft_input,
+                &self.ring_buffer[ring_read..ring_read + first],
+                &self.window[..first],
+                &mut self.fft_input[..first],
             );
-        } else {
-            // Wrapping: apply mask per element
-            profile_stage!(FftWindow);
-            for i in 0..self.frame_size {
-                let ring_idx = (ring_read + i) & ring_mask;
-                self.fft_input[i] = self.ring_buffer[ring_idx] as f32 * self.window[i];
-            }
+            let rest = self.frame_size - first;
+            crate::simd::window_apply(
+                &self.ring_buffer[..rest],
+                &self.window[first..],
+                &mut self.fft_input[first..],
+            );
         }
 
         // Compute real FFT
