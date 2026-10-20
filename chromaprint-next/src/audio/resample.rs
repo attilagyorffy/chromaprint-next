@@ -194,3 +194,113 @@ impl AvResampleContext {
         dst_index
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `resample` as ported from C (`avresample/resample2.c`), one output at a
+    /// time with a scalar dot product. Any faster `resample` must produce the
+    /// same samples and leave the same state.
+    fn resample_reference(
+        ctx: &mut AvResampleContext,
+        dst: &mut [i16],
+        src: &[i16],
+        consumed: &mut usize,
+        dst_size: usize,
+    ) -> usize {
+        let src_size = src.len() as i32;
+        let mut index = ctx.index;
+        let mut frac = ctx.frac;
+        let dst_incr_frac = ctx.dst_incr % ctx.src_incr;
+        let dst_incr = ctx.dst_incr / ctx.src_incr;
+        let mut dst_index = 0usize;
+
+        while dst_index < dst_size {
+            let filter = &ctx.filter_bank[ctx.filter_length * ((index & ctx.phase_mask) as usize)..];
+            let sample_index = index >> ctx.phase_shift;
+            if sample_index >= 0 && sample_index + ctx.filter_length as i32 > src_size {
+                break;
+            }
+            let mut val: i32 = 0;
+            for i in 0..ctx.filter_length as i32 {
+                let si = if sample_index < 0 {
+                    ((sample_index + i).abs() % src_size) as usize
+                } else {
+                    (sample_index + i) as usize
+                };
+                val = val.wrapping_add(src[si] as i32 * filter[i as usize] as i32);
+            }
+            val = val.wrapping_add(1 << (FILTER_SHIFT - 1)) >> FILTER_SHIFT;
+            dst[dst_index] = val.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+
+            frac += dst_incr_frac;
+            index += dst_incr;
+            if frac >= ctx.src_incr {
+                frac -= ctx.src_incr;
+                index += 1;
+            }
+            dst_index += 1;
+        }
+
+        *consumed = (index.max(0) >> ctx.phase_shift) as usize;
+        if index >= 0 {
+            index &= ctx.phase_mask;
+        }
+        ctx.frac = frac;
+        ctx.index = index;
+        ctx.dst_incr = dst_incr_frac + ctx.src_incr * dst_incr;
+        dst_index
+    }
+
+    #[test]
+    fn resample_matches_reference() {
+        let mut state = 0x853C_49E6_748F_EA9Bu64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Mostly full-scale noise, with runs of extremes to drive saturation.
+        let input: Vec<i16> = (0..200_000)
+            .map(|i| match (i / 1000) % 7 {
+                0 => i16::MAX,
+                1 => i16::MIN,
+                _ => next() as i16,
+            })
+            .collect();
+
+        for in_rate in [8000, 16000, 22050, 44100, 48000, 96000, 192000] {
+            let mut fast = AvResampleContext::new(11025, in_rate, 16, 8, false, 0.8);
+            let mut reference = AvResampleContext::new(11025, in_rate, 16, 8, false, 0.8);
+            let (mut fast_out, mut ref_out) = (vec![0i16; 8192], vec![0i16; 8192]);
+            let mut pos = 0;
+            // Uneven chunks and output limits, carrying unconsumed input over as
+            // AudioProcessor does, so batch boundaries land everywhere.
+            for call in 0.. {
+                let len = (1000 + (call * 7919) % 30_000).min(input.len() - pos);
+                if len == 0 {
+                    break;
+                }
+                let src = &input[pos..pos + len];
+                let dst_size = 1 + (call * 4111) % 8192;
+                let (mut fast_consumed, mut ref_consumed) = (0, 0);
+                let n = fast.resample(&mut fast_out, src, &mut fast_consumed, dst_size);
+                let n_ref = resample_reference(&mut reference, &mut ref_out, src, &mut ref_consumed, dst_size);
+                assert_eq!(n, n_ref, "rate={in_rate} call={call}: output count");
+                assert_eq!(fast_out[..n], ref_out[..n], "rate={in_rate} call={call}: samples");
+                assert_eq!(fast_consumed, ref_consumed, "rate={in_rate} call={call}: consumed");
+                assert_eq!(
+                    (fast.index, fast.frac, fast.dst_incr),
+                    (reference.index, reference.frac, reference.dst_incr),
+                    "rate={in_rate} call={call}: state"
+                );
+                pos += fast_consumed.min(len);
+                if fast_consumed == 0 {
+                    pos += len;
+                }
+            }
+        }
+    }
+}
