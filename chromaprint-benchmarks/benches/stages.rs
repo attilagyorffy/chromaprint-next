@@ -1,6 +1,7 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 
 use chromaprint::audio::processor::AudioProcessor;
+use chromaprint::audio::resample::AvResampleContext;
 use chromaprint::chroma::extractor::ChromaExtractor;
 use chromaprint::chroma::filter::ChromaFilter;
 use chromaprint::chroma::normalizer;
@@ -152,5 +153,39 @@ fn stage_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, stage_benchmarks);
+/// Per-stream construction cost, paid once per fingerprint whatever the audio
+/// length, so it dominates short clips.
+fn setup_benchmarks(c: &mut Criterion) {
+    let cfg = config::get_config(Algorithm::Test2);
+    let mut group = c.benchmark_group("setup");
+
+    group.bench_function("fingerprinter_new_start", |b| {
+        b.iter(|| {
+            let mut fp = chromaprint::Fingerprinter::new(Algorithm::Test2);
+            fp.start(44100, 2).unwrap();
+            fp
+        });
+    });
+    group.bench_function("resampler_44100", |b| {
+        b.iter(|| AvResampleContext::new(cfg.sample_rate as i32, 44100, 16, 8, false, 0.8));
+    });
+    group.bench_function("fft_processor", |b| {
+        b.iter(|| FftProcessor::new(cfg.frame_size, cfg.frame_overlap));
+    });
+    group.bench_function("chroma_extractor", |b| {
+        b.iter(|| {
+            ChromaExtractor::new(
+                config::MIN_FREQ,
+                config::MAX_FREQ,
+                cfg.frame_size,
+                cfg.sample_rate,
+                cfg.interpolate,
+            )
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, stage_benchmarks, setup_benchmarks);
 criterion_main!(benches);
