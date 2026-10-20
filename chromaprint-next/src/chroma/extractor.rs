@@ -3,10 +3,19 @@ use crate::types::{ChromaVector, NUM_BANDS};
 // Use f64 to match the C implementation which uses double throughout.
 const BASE_FREQ: f64 = 440.0 / 16.0; // 27.5 Hz (A0)
 
+/// Consecutive FFT bins `start..end` that all map to `note`.
+#[derive(Debug, Clone, Copy)]
+struct NoteRun {
+    start: usize,
+    end: usize,
+    note: usize,
+}
+
 /// Maps FFT power spectrum bins to 12-band chroma features.
 pub struct ChromaExtractor {
     notes: Vec<u8>,
     notes_frac: Vec<f64>,
+    runs: Vec<NoteRun>,
     min_index: usize,
     max_index: usize,
     interpolate: bool,
@@ -17,6 +26,7 @@ impl ChromaExtractor {
         let mut extractor = Self {
             notes: vec![0; frame_size],
             notes_frac: vec![0.0; frame_size],
+            runs: Vec::new(),
             min_index: 0,
             max_index: 0,
             interpolate,
@@ -38,6 +48,14 @@ impl ChromaExtractor {
             self.notes[i] = (note as i8) as u8;
             self.notes_frac[i] = note - (note as i8 as f64);
         }
+
+        for i in self.min_index..self.max_index {
+            let note = self.notes[i] as usize;
+            match self.runs.last_mut() {
+                Some(run) if run.note == note => run.end = i + 1,
+                _ => self.runs.push(NoteRun { start: i, end: i + 1, note }),
+            }
+        }
     }
 
     /// Extract chroma features from an FFT power spectrum frame.
@@ -46,29 +64,40 @@ impl ChromaExtractor {
         profile_stage!(ChromaExtract);
         let mut features = [0.0f64; NUM_BANDS];
 
+        if !self.interpolate {
+            // Sum each run of same-note bins in a register instead of through
+            // `features[note]` in memory, which serialized every addition on a
+            // store-to-load round trip. Each band still receives its bins in
+            // ascending index order, so the f64 result is bit-identical.
+            for run in &self.runs {
+                let mut sum = features[run.note];
+                for &energy in &frame[run.start..run.end] {
+                    sum += energy as f64;
+                }
+                features[run.note] = sum;
+            }
+            return features;
+        }
+
         #[allow(clippy::needless_range_loop)] // index shared across notes/notes_frac/frame
         for i in self.min_index..self.max_index {
             let note = self.notes[i] as usize;
             let energy = frame[i] as f64;
 
-            if self.interpolate {
-                let frac = self.notes_frac[i];
-                let mut note2 = note;
-                let mut a: f64 = 1.0;
+            let frac = self.notes_frac[i];
+            let mut note2 = note;
+            let mut a: f64 = 1.0;
 
-                if frac < 0.5 {
-                    note2 = (note + NUM_BANDS - 1) % NUM_BANDS;
-                    a = 0.5 + frac;
-                } else if frac > 0.5 {
-                    note2 = (note + 1) % NUM_BANDS;
-                    a = 1.5 - frac;
-                }
-
-                features[note] += energy * a;
-                features[note2] += energy * (1.0 - a);
-            } else {
-                features[note] += energy;
+            if frac < 0.5 {
+                note2 = (note + NUM_BANDS - 1) % NUM_BANDS;
+                a = 0.5 + frac;
+            } else if frac > 0.5 {
+                note2 = (note + 1) % NUM_BANDS;
+                a = 1.5 - frac;
             }
+
+            features[note] += energy * a;
+            features[note2] += energy * (1.0 - a);
         }
 
         features
