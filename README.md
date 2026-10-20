@@ -4,17 +4,17 @@ A pure-Rust, drop-in replacement for [Chromaprint](https://github.com/acoustid/c
 
 Produces **bit-identical fingerprints** to the C reference implementation across all five algorithm variants, [verified](chromaprint-next/docs/implementation.md#how-each-stage-matches-the-reference) by running both implementations side-by-side on identical inputs and asserting equality of raw fingerprints, encoded strings, and hashes.
 
-**About 2x faster than C** — chromaprint-next fingerprints 120 s of audio in 8.9 ms against the C reference library's 17.2 ms (596 vs 308 Melem/s), and short clips up to 4x faster, even though the C version uses Apple's hardware-optimised Accelerate/vDSP for FFT. This comes from SIMD kernels in the resampler, FFT post-processing and windowing, batched resampler outputs, shared filter banks, and register accumulation in chroma extraction, each verified bit-exact against the code it replaced. See [benchmarks](chromaprint-next/docs/benchmarks.md) for details.
+**About 2x faster than C** — chromaprint-next fingerprints 120 s of audio in 9.0 ms against the C reference library's (v1.6.2) 17.4 ms (589 vs 304 Melem/s), and short clips up to 4x faster, even though the C version uses Apple's hardware-optimised Accelerate/vDSP for FFT. This comes from SIMD kernels in the resampler, FFT post-processing and windowing, batched resampler outputs, shared filter banks, and register accumulation in chroma extraction, each verified bit-exact against the code it replaced. See [benchmarks](chromaprint-next/docs/benchmarks.md) for details.
 
 | Audio length | C reference | chromaprint-next | rusty-chromaprint |
 |--------------|------------|-----------------|-------------------|
-| 2 sec | 1.36 ms | **0.32 ms** (4.2x faster) | 1.33 ms |
-| 10 sec | 2.14 ms | **0.76 ms** (2.8x faster) | 3.20 ms |
-| 30 sec | 4.87 ms | **2.24 ms** (2.2x faster) | 9.57 ms |
-| 60 sec | 8.99 ms | **4.43 ms** (2.0x faster) | 19.07 ms |
-| 120 sec | 17.21 ms | **8.88 ms** (1.9x faster) | 37.91 ms |
+| 2 sec | 1.34 ms | **0.32 ms** (4.1x faster) | 1.33 ms |
+| 10 sec | 2.23 ms | **0.77 ms** (2.9x faster) | 3.25 ms |
+| 30 sec | 4.90 ms | **2.29 ms** (2.1x faster) | 9.75 ms |
+| 60 sec | 9.24 ms | **4.51 ms** (2.0x faster) | 19.85 ms |
+| 120 sec | 17.38 ms | **8.98 ms** (1.9x faster) | 38.68 ms |
 
-Test2 algorithm, 44.1 kHz mono, single thread, Apple M1 Max.
+Test2 algorithm, 44.1 kHz mono, single thread, Apple M1 Max, C reference v1.6.2.
 
 ## Repository structure
 

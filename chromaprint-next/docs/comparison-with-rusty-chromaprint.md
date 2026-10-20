@@ -74,10 +74,10 @@ chromaprint-next is approximately **4x faster** than rusty-chromaprint across al
 | Duration | chromaprint-next | rusty-chromaprint | Speedup |
 |----------|-----------------|-------------------|---------|
 | 2 sec | 0.32 ms | 1.33 ms | 4.1x |
-| 10 sec | 0.76 ms | 3.20 ms | 4.2x |
-| 30 sec | 2.24 ms | 9.57 ms | 4.3x |
-| 60 sec | 4.43 ms | 19.07 ms | 4.3x |
-| 120 sec | 8.88 ms | 37.91 ms | 4.3x |
+| 10 sec | 0.77 ms | 3.25 ms | 4.2x |
+| 30 sec | 2.29 ms | 9.75 ms | 4.3x |
+| 60 sec | 4.51 ms | 19.85 ms | 4.4x |
+| 120 sec | 8.98 ms | 38.68 ms | 4.3x |
 
 Measured on Apple M1 Max, macOS 26.6, Rust 1.96.0, using the Test2 (default) algorithm on mono 44100 Hz input. See [benchmarks.md](benchmarks.md) for full results including comparison with the C reference.
 

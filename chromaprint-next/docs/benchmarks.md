@@ -6,51 +6,51 @@ Benchmarks are run with [Criterion.rs](https://github.com/bheisler/criterion.rs)
 
 ## Results
 
-Measured on Apple M1 Max, macOS 26.6, Rust 1.96.0 (release profile), single thread. The C reference library uses Accelerate/vDSP for FFT. Times are criterion medians, averaged over two runs.
+Measured on Apple M1 Max, macOS 26.6, Rust 1.96.0 (release profile), single thread, against C chromaprint v1.6.2 (the `chromaprint` submodule). The C reference library uses Accelerate/vDSP for FFT. Times are criterion medians, averaged over two runs.
 
 | Duration | C reference | chromaprint-next | rusty-chromaprint |
 |----------|------------|-----------------|-------------------|
-| 2 sec | 1.36 ms | 0.32 ms | 1.33 ms |
-| 10 sec | 2.14 ms | 0.76 ms | 3.20 ms |
-| 30 sec | 4.87 ms | 2.24 ms | 9.57 ms |
-| 60 sec | 8.99 ms | 4.43 ms | 19.07 ms |
-| 120 sec | 17.21 ms | 8.88 ms | 37.91 ms |
+| 2 sec | 1.34 ms | 0.32 ms | 1.33 ms |
+| 10 sec | 2.23 ms | 0.77 ms | 3.25 ms |
+| 30 sec | 4.90 ms | 2.29 ms | 9.75 ms |
+| 60 sec | 9.24 ms | 4.51 ms | 19.85 ms |
+| 120 sec | 17.38 ms | 8.98 ms | 38.68 ms |
 
 ### Throughput (samples/sec)
 
 | Duration | C reference | chromaprint-next | rusty-chromaprint |
 |----------|------------|-----------------|-------------------|
-| 2 sec | 129 Melem/s | 545 Melem/s | 133 Melem/s |
-| 10 sec | 206 Melem/s | 579 Melem/s | 138 Melem/s |
-| 30 sec | 271 Melem/s | 591 Melem/s | 138 Melem/s |
-| 60 sec | 294 Melem/s | 597 Melem/s | 139 Melem/s |
-| 120 sec | 308 Melem/s | 596 Melem/s | 140 Melem/s |
+| 2 sec | 132 Melem/s | 546 Melem/s | 133 Melem/s |
+| 10 sec | 198 Melem/s | 574 Melem/s | 136 Melem/s |
+| 30 sec | 270 Melem/s | 579 Melem/s | 136 Melem/s |
+| 60 sec | 286 Melem/s | 587 Melem/s | 133 Melem/s |
+| 120 sec | 304 Melem/s | 589 Melem/s | 137 Melem/s |
 
 ### Relative performance (vs C reference)
 
 | Duration | chromaprint-next | rusty-chromaprint |
 |----------|-----------------|-------------------|
-| 2 sec | **0.24x (4.2x faster)** | 0.97x |
-| 10 sec | **0.36x (2.8x faster)** | 1.49x |
-| 30 sec | **0.46x (2.2x faster)** | 1.96x |
-| 60 sec | **0.49x (2.0x faster)** | 2.12x |
-| 120 sec | **0.52x (1.9x faster)** | 2.20x |
+| 2 sec | **0.24x (4.1x faster)** | 0.99x |
+| 10 sec | **0.34x (2.9x faster)** | 1.46x |
+| 30 sec | **0.47x (2.1x faster)** | 1.99x |
+| 60 sec | **0.49x (2.0x faster)** | 2.15x |
+| 120 sec | **0.52x (1.9x faster)** | 2.23x |
 
 Short clips gain the most because per-stream setup is now 37 µs (see below), where C rebuilds its resampler filter bank for every stream.
 
 ### Before and after the hot-path optimisation pass
 
-The same benchmark on the previous release of chromaprint-next, in the same session:
+The same benchmark on the previous release of chromaprint-next, measured on the same day and machine:
 
 | Duration | before | after | change |
 |----------|--------|-------|--------|
 | 2 sec | 1.24 ms | 0.32 ms | −74% |
-| 10 sec | 2.16 ms | 0.76 ms | −65% |
-| 30 sec | 5.25 ms | 2.24 ms | −57% |
-| 60 sec | 9.95 ms | 4.43 ms | −55% |
-| 120 sec | 19.05 ms | 8.88 ms | −53% |
+| 10 sec | 2.16 ms | 0.77 ms | −64% |
+| 30 sec | 5.25 ms | 2.29 ms | −56% |
+| 60 sec | 9.95 ms | 4.51 ms | −55% |
+| 120 sec | 19.05 ms | 8.98 ms | −53% |
 
-Before, chromaprint-next was 1–11% slower than C from 10 seconds up.
+Before, chromaprint-next was 1–11% slower than C from 10 seconds up. Moving the C reference from v1.6.0 to v1.6.2 did not change its speed beyond run-to-run noise (within ±3%).
 
 ## Pipeline stage breakdown
 
@@ -113,7 +113,7 @@ The C comparison tests do not detect every last-bit floating-point difference: r
 
 - **chromaprint-next is about 2x faster than the C reference** on full-length tracks and 4x faster on short clips, despite the C library using Apple's Accelerate/vDSP for FFT.
 
-- **chromaprint-next is 4–5x faster than rusty-chromaprint.** rusty-chromaprint uses `rubato`, a general-purpose resampler with higher per-sample overhead, instead of the fixed-point `av_resample` port.
+- **chromaprint-next is about 4x faster than rusty-chromaprint.** rusty-chromaprint uses `rubato`, a general-purpose resampler with higher per-sample overhead, instead of the fixed-point `av_resample` port.
 
 - **Resampling and the complex FFT now account for 72% of time.** The FFT is left to rustfft: a different FFT algorithm would change rounding, which the C comparison tests cannot be relied on to catch.
 
