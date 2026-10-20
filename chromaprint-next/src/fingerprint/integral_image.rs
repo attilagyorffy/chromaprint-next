@@ -30,6 +30,7 @@ impl RollingIntegralImage {
 
     /// Add a new row of values to the integral image.
     pub fn add_row(&mut self, row: &[f64]) {
+        profile_stage!(IntegralImage);
         let size = row.len();
         if self.num_columns == 0 {
             self.num_columns = size;

@@ -10,6 +10,8 @@ rusty-chromaprint = { path = "../rusty-chromaprint/chromaprint" }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
+realfft = "3"
+rustfft = "6"
 
 [build-dependencies]
 cmake = "0.1"
@@ -20,4 +22,8 @@ harness = false
 
 [[bench]]
 name = "stages"
+harness = false
+
+[[bench]]
+name = "kernels"
 harness = false

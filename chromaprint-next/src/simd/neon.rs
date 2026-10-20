@@ -2,9 +2,10 @@ use std::arch::aarch64::*;
 
 /// NEON-accelerated i16 × i16 dot product with i32 accumulator.
 ///
-/// Uses `vmlal_s16` (signed multiply-accumulate long) to process
-/// 4 i16 pairs per instruction, with two accumulator chains for
-/// instruction-level parallelism.
+/// Loads 16 i16 pairs per iteration as two 128-bit vectors and feeds four
+/// independent `smlal`/`smlal2` accumulator chains, so the multiply-accumulate
+/// latency is hidden behind the other chains. Integer addition is associative
+/// (wrapping), so the result is identical to the scalar sum.
 #[inline]
 pub fn dot_product_i16(a: &[i16], b: &[i16]) -> i32 {
     debug_assert_eq!(a.len(), b.len());
@@ -16,33 +17,71 @@ pub fn dot_product_i16(a: &[i16], b: &[i16]) -> i32 {
 
         let mut acc0 = vdupq_n_s32(0);
         let mut acc1 = vdupq_n_s32(0);
+        let mut acc2 = vdupq_n_s32(0);
+        let mut acc3 = vdupq_n_s32(0);
 
-        let chunks = len / 8;
+        let mut acc4 = vdupq_n_s32(0);
+        let mut acc5 = vdupq_n_s32(0);
+        let mut acc6 = vdupq_n_s32(0);
+        let mut acc7 = vdupq_n_s32(0);
 
-        for i in 0..chunks {
-            let offset = i * 8;
-            let a_lo = vld1_s16(a_ptr.add(offset));
-            let b_lo = vld1_s16(b_ptr.add(offset));
-            let a_hi = vld1_s16(a_ptr.add(offset + 4));
-            let b_hi = vld1_s16(b_ptr.add(offset + 4));
+        let mut offset = 0;
+        while offset + 32 <= len {
+            let a0 = vld1q_s16(a_ptr.add(offset));
+            let b0 = vld1q_s16(b_ptr.add(offset));
+            let a1 = vld1q_s16(a_ptr.add(offset + 8));
+            let b1 = vld1q_s16(b_ptr.add(offset + 8));
+            let a2 = vld1q_s16(a_ptr.add(offset + 16));
+            let b2 = vld1q_s16(b_ptr.add(offset + 16));
+            let a3 = vld1q_s16(a_ptr.add(offset + 24));
+            let b3 = vld1q_s16(b_ptr.add(offset + 24));
 
-            acc0 = vmlal_s16(acc0, a_lo, b_lo);
-            acc1 = vmlal_s16(acc1, a_hi, b_hi);
+            acc0 = vmlal_s16(acc0, vget_low_s16(a0), vget_low_s16(b0));
+            acc1 = vmlal_high_s16(acc1, a0, b0);
+            acc2 = vmlal_s16(acc2, vget_low_s16(a1), vget_low_s16(b1));
+            acc3 = vmlal_high_s16(acc3, a1, b1);
+            acc4 = vmlal_s16(acc4, vget_low_s16(a2), vget_low_s16(b2));
+            acc5 = vmlal_high_s16(acc5, a2, b2);
+            acc6 = vmlal_s16(acc6, vget_low_s16(a3), vget_low_s16(b3));
+            acc7 = vmlal_high_s16(acc7, a3, b3);
+            offset += 32;
         }
 
-        acc0 = vaddq_s32(acc0, acc1);
+        if len - offset >= 16 {
+            let a0 = vld1q_s16(a_ptr.add(offset));
+            let b0 = vld1q_s16(b_ptr.add(offset));
+            let a1 = vld1q_s16(a_ptr.add(offset + 8));
+            let b1 = vld1q_s16(b_ptr.add(offset + 8));
+            acc4 = vmlal_s16(acc4, vget_low_s16(a0), vget_low_s16(b0));
+            acc5 = vmlal_high_s16(acc5, a0, b0);
+            acc6 = vmlal_s16(acc6, vget_low_s16(a1), vget_low_s16(b1));
+            acc7 = vmlal_high_s16(acc7, a1, b1);
+            offset += 16;
+        }
+        acc0 = vaddq_s32(acc0, acc4);
+        acc1 = vaddq_s32(acc1, acc5);
+        acc2 = vaddq_s32(acc2, acc6);
+        acc3 = vaddq_s32(acc3, acc7);
 
-        // Handle 4-element remainder chunk
-        let mut offset = chunks * 8;
+        // 8-element remainder chunk
+        if len - offset >= 8 {
+            let a0 = vld1q_s16(a_ptr.add(offset));
+            let b0 = vld1q_s16(b_ptr.add(offset));
+            acc0 = vmlal_s16(acc0, vget_low_s16(a0), vget_low_s16(b0));
+            acc1 = vmlal_high_s16(acc1, a0, b0);
+            offset += 8;
+        }
+
+        // 4-element remainder chunk
         if len - offset >= 4 {
             let a_v = vld1_s16(a_ptr.add(offset));
             let b_v = vld1_s16(b_ptr.add(offset));
-            acc0 = vmlal_s16(acc0, a_v, b_v);
+            acc2 = vmlal_s16(acc2, a_v, b_v);
             offset += 4;
         }
 
         // Horizontal sum
-        let mut result = vaddvq_s32(acc0);
+        let mut result = vaddvq_s32(vaddq_s32(vaddq_s32(acc0, acc1), vaddq_s32(acc2, acc3)));
 
         // Scalar tail (0-3 elements)
         for i in 0..(len - offset) {
@@ -51,6 +90,172 @@ pub fn dot_product_i16(a: &[i16], b: &[i16]) -> i32 {
 
         result
     }
+}
+
+/// NEON-accelerated batch of four i16 × i16 dot products.
+///
+/// Each product keeps two `smlal`/`smlal2` chains, giving eight independent
+/// chains in total. The four results are reduced together with two levels of
+/// pairwise adds instead of one `addv` per result.
+#[inline]
+pub fn dot_product_i16_x4(a: [&[i16]; 4], b: [&[i16]; 4]) -> [i32; 4] {
+    let len = a[0].len();
+    debug_assert!(a.iter().chain(b.iter()).all(|s| s.len() == len));
+
+    unsafe {
+        let ap = a.map(<[i16]>::as_ptr);
+        let bp = b.map(<[i16]>::as_ptr);
+
+        let mut lo = [vdupq_n_s32(0); 4];
+        let mut hi = [vdupq_n_s32(0); 4];
+
+        let mut offset = 0;
+        while offset + 8 <= len {
+            for k in 0..4 {
+                let av = vld1q_s16(ap[k].add(offset));
+                let bv = vld1q_s16(bp[k].add(offset));
+                lo[k] = vmlal_s16(lo[k], vget_low_s16(av), vget_low_s16(bv));
+                hi[k] = vmlal_high_s16(hi[k], av, bv);
+            }
+            offset += 8;
+        }
+
+        // 4-element remainder chunk
+        if len - offset >= 4 {
+            for k in 0..4 {
+                let av = vld1_s16(ap[k].add(offset));
+                let bv = vld1_s16(bp[k].add(offset));
+                lo[k] = vmlal_s16(lo[k], av, bv);
+            }
+            offset += 4;
+        }
+
+        // Lane k of the result is the horizontal sum of product k.
+        let s = [0, 1, 2, 3].map(|k| vaddq_s32(lo[k], hi[k]));
+        let sums = vpaddq_s32(vpaddq_s32(s[0], s[1]), vpaddq_s32(s[2], s[3]));
+        let mut result = [0i32; 4];
+        vst1q_s32(result.as_mut_ptr(), sums);
+
+        // Scalar tail (0-3 elements)
+        for (k, r) in result.iter_mut().enumerate() {
+            for i in offset..len {
+                *r = r.wrapping_add(*ap[k].add(i) as i32 * *bp[k].add(i) as i32);
+            }
+        }
+
+        result
+    }
+}
+
+/// [`dot_product_i16_x4`] with one `b` shared by all four products, loaded
+/// once per chunk instead of four times.
+#[inline]
+pub fn dot_product_i16_x4_shared(a: [&[i16]; 4], b: &[i16]) -> [i32; 4] {
+    let len = b.len();
+    debug_assert!(a.iter().all(|s| s.len() == len));
+
+    unsafe {
+        let ap = a.map(<[i16]>::as_ptr);
+        let bp = b.as_ptr();
+
+        let mut lo = [vdupq_n_s32(0); 4];
+        let mut hi = [vdupq_n_s32(0); 4];
+
+        let mut offset = 0;
+        while offset + 8 <= len {
+            let bv = vld1q_s16(bp.add(offset));
+            for k in 0..4 {
+                let av = vld1q_s16(ap[k].add(offset));
+                lo[k] = vmlal_s16(lo[k], vget_low_s16(av), vget_low_s16(bv));
+                hi[k] = vmlal_high_s16(hi[k], av, bv);
+            }
+            offset += 8;
+        }
+
+        // 4-element remainder chunk
+        if len - offset >= 4 {
+            let bv = vld1_s16(bp.add(offset));
+            for k in 0..4 {
+                let av = vld1_s16(ap[k].add(offset));
+                lo[k] = vmlal_s16(lo[k], av, bv);
+            }
+            offset += 4;
+        }
+
+        let s = [0, 1, 2, 3].map(|k| vaddq_s32(lo[k], hi[k]));
+        let sums = vpaddq_s32(vpaddq_s32(s[0], s[1]), vpaddq_s32(s[2], s[3]));
+        let mut result = [0i32; 4];
+        vst1q_s32(result.as_mut_ptr(), sums);
+
+        // Scalar tail (0-3 elements)
+        for (k, r) in result.iter_mut().enumerate() {
+            for i in offset..len {
+                *r = r.wrapping_add(*ap[k].add(i) as i32 * *bp.add(i) as i32);
+            }
+        }
+
+        result
+    }
+}
+
+/// Reverse the four lanes of a vector.
+#[inline(always)]
+unsafe fn reverse_f32x4(v: float32x4_t) -> float32x4_t {
+    let pairs_swapped = vrev64q_f32(v);
+    vextq_f32::<2>(pairs_swapped, pairs_swapped)
+}
+
+/// NEON twiddle pass of a real FFT, four bin pairs per iteration; see
+/// `simd::real_fft_power_pairs`.
+///
+/// Bins `k..k + 4` load directly; their partners `n - k - 3..=n - k` load
+/// as one block and are lane-reversed. Only `vaddq`/`vsubq`/`vmulq` are used,
+/// in the scalar order, never `vfmaq`, so results are bit-identical.
+#[inline]
+pub fn real_fft_power_pairs(x: &[f32], twiddles_re: &[f32], twiddles_im: &[f32], power: &mut [f32]) {
+    let n = x.len() / 2;
+    let pairs = twiddles_re.len();
+    debug_assert!(2 * (pairs + 1) <= n && power.len() > n && twiddles_im.len() == pairs);
+
+    let mut k = 1;
+    // SAFETY: k + 3 <= pairs < n / 2, so bins k..k+4 and n-k-3..=n-k are
+    // within the n bins of x, twiddles k-1..k+3 within the twiddle slices,
+    // and power indices within power.len() > n (asserted by the caller).
+    unsafe {
+        let x_ptr = x.as_ptr();
+        let p_ptr = power.as_mut_ptr();
+        let half = vdupq_n_f32(0.5);
+        while k + 3 <= pairs {
+            let tw_re = vld1q_f32(twiddles_re.as_ptr().add(k - 1));
+            let tw_im = vld1q_f32(twiddles_im.as_ptr().add(k - 1));
+            let out = vld2q_f32(x_ptr.add(2 * k));
+            let rev = vld2q_f32(x_ptr.add(2 * (n - k - 3)));
+            let (out_re, out_im) = (out.0, out.1);
+            let (rev_re, rev_im) = (reverse_f32x4(rev.0), reverse_f32x4(rev.1));
+
+            let sum_re = vaddq_f32(out_re, rev_re);
+            let sum_im = vaddq_f32(out_im, rev_im);
+            let diff_re = vsubq_f32(out_re, rev_re);
+            let diff_im = vsubq_f32(out_im, rev_im);
+            let twiddled_re = vaddq_f32(vmulq_f32(sum_im, tw_re), vmulq_f32(diff_re, tw_im));
+            let twiddled_im = vsubq_f32(vmulq_f32(sum_im, tw_im), vmulq_f32(diff_re, tw_re));
+            let half_sum_re = vmulq_f32(half, sum_re);
+            let half_diff_im = vmulq_f32(half, diff_im);
+
+            let re = vaddq_f32(half_sum_re, twiddled_re);
+            let im = vaddq_f32(half_diff_im, twiddled_im);
+            vst1q_f32(p_ptr.add(k), vaddq_f32(vmulq_f32(re, re), vmulq_f32(im, im)));
+
+            let re = vsubq_f32(half_sum_re, twiddled_re);
+            let im = vsubq_f32(twiddled_im, half_diff_im);
+            let rev_power = vaddq_f32(vmulq_f32(re, re), vmulq_f32(im, im));
+            vst1q_f32(p_ptr.add(n - k - 3), reverse_f32x4(rev_power));
+
+            k += 4;
+        }
+    }
+
+    super::scalar::real_fft_power_pairs(x, twiddles_re, twiddles_im, power, k);
 }
 
 /// NEON-accelerated stereo-to-mono mixing.

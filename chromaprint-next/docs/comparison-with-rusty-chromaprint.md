@@ -69,25 +69,27 @@ rusty-chromaprint includes a fingerprint matching API (`match_fingerprints`) tha
 
 ## Performance
 
-chromaprint-next is approximately **2x faster** than rusty-chromaprint across all input sizes. Both are pure Rust, but differ significantly in their internal architecture.
+chromaprint-next is approximately **4x faster** than rusty-chromaprint across all input sizes. Both are pure Rust, but differ significantly in their internal architecture.
 
 | Duration | chromaprint-next | rusty-chromaprint | Speedup |
 |----------|-----------------|-------------------|---------|
-| 2 sec | 1.25 ms | 1.35 ms | 1.08x |
-| 10 sec | 2.23 ms | 3.32 ms | 1.49x |
-| 30 sec | 5.42 ms | 9.94 ms | 1.83x |
-| 60 sec | 10.16 ms | 20.01 ms | 1.97x |
-| 120 sec | 19.66 ms | 39.59 ms | 2.01x |
+| 2 sec | 0.32 ms | 1.33 ms | 4.1x |
+| 10 sec | 0.77 ms | 3.25 ms | 4.2x |
+| 30 sec | 2.29 ms | 9.75 ms | 4.3x |
+| 60 sec | 4.51 ms | 19.85 ms | 4.4x |
+| 120 sec | 8.98 ms | 38.68 ms | 4.3x |
 
-Measured on Apple M1 Pro, macOS, Rust 1.93.0, using the Test2 (default) algorithm on mono 44100 Hz input. See [benchmarks.md](benchmarks.md) for full results including comparison with the C reference.
+Measured on Apple M1 Max, macOS 26.6, Rust 1.96.0, using the Test2 (default) algorithm on mono 44100 Hz input. See [benchmarks.md](benchmarks.md) for full results including comparison with the C reference.
 
 ### Why chromaprint-next is faster
 
-The performance gap comes from three areas:
+The performance gap comes from these areas:
 
-**Resampler.** The largest difference is in the 44100→11025 Hz resampling stage, which accounts for ~50% of the pipeline. chromaprint-next ports the C library's `av_resample` — a polyphase FIR filter with fixed-point i16 arithmetic and an 80-tap Kaiser-windowed sinc kernel. The inner convolution loop is accelerated with NEON SIMD intrinsics on aarch64 (`vmlal_s16`, processing 4 i16 pairs per instruction with dual accumulators) and SSE2 on x86_64 (`_mm_madd_epi16`). rusty-chromaprint uses [`rubato`](https://crates.io/crates/rubato), a general-purpose asynchronous resampler designed for arbitrary rate conversion. rubato operates in f64, supports variable ratios, and has higher per-sample overhead — capabilities that are unnecessary for chromaprint's fixed 4:1 downsampling.
+**Resampler.** The largest difference is in the 44100→11025 Hz resampling stage, still the largest stage at ~40% of chromaprint-next's time. chromaprint-next ports the C library's `av_resample` — a polyphase FIR filter with fixed-point i16 arithmetic and an 80-tap Kaiser-windowed sinc kernel. The inner convolution loop is accelerated with NEON SIMD intrinsics on aarch64 (`smlal`/`smlal2` with eight accumulator chains, four outputs per pass, and one shared filter load at integer rate ratios such as 44.1 kHz) and SSE2 on x86_64 (`_mm_madd_epi16`). Filter banks are built once per process and shared between streams. rusty-chromaprint uses [`rubato`](https://crates.io/crates/rubato), a general-purpose asynchronous resampler designed for arbitrary rate conversion. rubato operates in f64, supports variable ratios, and has higher per-sample overhead — capabilities that are unnecessary for chromaprint's fixed 4:1 downsampling.
 
-**FFT processor.** chromaprint-next's FFT processor uses a power-of-2 ring buffer with bitmask indexing (instead of modulo), bulk `copy_from_slice` for input, and a fast path that avoids per-element index masking when the frame doesn't wrap around the buffer. These are small gains individually but add up across thousands of frames.
+**FFT processor.** chromaprint-next's FFT processor uses a power-of-2 ring buffer with bitmask indexing (instead of modulo), bulk `copy_from_slice` for input, and a fast path that avoids per-element index masking when the frame doesn't wrap around the buffer. Frames that do wrap are windowed as two contiguous SIMD calls. The real FFT's twiddle pass is fused with the power spectrum in one NEON loop.
+
+**Chroma extraction.** Consecutive bins that map to the same note are summed in a register instead of through memory.
 
 **Bounds-check elimination.** In the resampler's hot path, where surrounding guards already prove the access is in-bounds, `get_unchecked` is used to eliminate redundant bounds checks that the compiler cannot otherwise remove.
 
@@ -101,4 +103,4 @@ For the default Test2 algorithm with properly-declared audio streams, rusty-chro
 - **Bug-compatible** with the C library's Test3 quirks, ensuring database compatibility with existing C-generated fingerprints.
 - **Complete presets** for all algorithms, not just Test1 and Test2.
 - **Same resampling algorithm** as the C library, eliminating numerical divergence from third-party resamplers.
-- **~2x faster** than rusty-chromaprint and ~4% faster than the C reference, thanks to SIMD-optimised resampling and careful hot-path engineering.
+- **~4x faster** than rusty-chromaprint and ~2x faster than the C reference, thanks to SIMD kernels and hot-path work that is verified bit-exact.

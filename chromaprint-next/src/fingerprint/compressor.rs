@@ -5,6 +5,7 @@ const MAX_NORMAL_VALUE: u32 = (1 << NORMAL_BITS) - 1; // 7
 
 /// Compress a raw fingerprint into a binary string, then base64 encode it.
 pub fn compress(data: &[u32], algorithm: Algorithm) -> String {
+    profile_stage!(Compress);
     let compressed = compress_raw(data, algorithm as u8);
     crate::codec::base64::encode(&compressed)
 }

@@ -4,7 +4,7 @@ A pure-Rust, drop-in replacement for [Chromaprint](https://github.com/acoustid/c
 
 Produces **bit-identical fingerprints** to the C reference implementation across all five algorithm variants.
 
-**Faster than C** — outperforms the C reference library by ~4% (269 vs 258 Melem/s at 120s), even though the C version uses Apple's hardware-optimised Accelerate/vDSP for FFT.
+**About 2x faster than C** — fingerprints 120 s of audio in 9.0 ms against the C reference library's (v1.6.2) 17.4 ms, and short clips up to 4x faster, even though the C version uses Apple's hardware-optimised Accelerate/vDSP for FFT (Test2, 44.1 kHz mono, Apple M1 Max).
 
 ## Usage
 

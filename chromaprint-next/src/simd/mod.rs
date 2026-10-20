@@ -1,4 +1,5 @@
-#[cfg(not(target_arch = "aarch64"))]
+// On aarch64 only the real-FFT tail is used from here.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
 mod scalar;
 
 #[cfg(target_arch = "aarch64")]
@@ -50,6 +51,33 @@ pub fn dot_product_i16(a: &[i16], b: &[i16]) -> i32 {
     }
 }
 
+/// Four independent dot products of equal length, as [`dot_product_i16`]
+/// computes them one at a time.
+///
+/// Batching lets NEON reduce all four accumulators together instead of paying
+/// a horizontal sum per result. Other targets compute them one by one.
+///
+/// # Panics
+/// Panics if the eight slices do not all have the same length.
+#[inline]
+pub fn dot_product_i16_x4(a: [&[i16]; 4], b: [&[i16]; 4]) -> [i32; 4] {
+    let len = a[0].len();
+    assert!(
+        a.iter().chain(b.iter()).all(|s| s.len() == len),
+        "dot_product_i16_x4: length mismatch"
+    );
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        neon::dot_product_i16_x4(a, b)
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        [0, 1, 2, 3].map(|k| dot_product_i16(a[k], b[k]))
+    }
+}
+
 /// Mix interleaved stereo i16 pairs to mono by averaging.
 ///
 /// `input` has `output.len() * 2` elements (L0,R0,L1,R1,...).
@@ -84,6 +112,61 @@ pub fn stereo_to_mono(input: &[i16], output: &mut [i16]) {
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86", target_arch = "x86_64")))]
     {
         scalar::stereo_to_mono(input, output)
+    }
+}
+
+/// [`dot_product_i16_x4`] with the same `b` for all four products: the
+/// resampler's case when the rate ratio is an integer, so every output uses
+/// the same filter phase.
+///
+/// # Panics
+/// Panics if the five slices do not all have the same length.
+#[inline]
+pub fn dot_product_i16_x4_shared(a: [&[i16]; 4], b: &[i16]) -> [i32; 4] {
+    assert!(
+        a.iter().all(|s| s.len() == b.len()),
+        "dot_product_i16_x4_shared: length mismatch"
+    );
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        neon::dot_product_i16_x4_shared(a, b)
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        [0, 1, 2, 3].map(|k| dot_product_i16(a[k], b))
+    }
+}
+
+/// The twiddle pass of a real FFT (realfft's `RealToComplexEven`), writing
+/// power instead of complex bins.
+///
+/// `x` is the half-length complex FFT of the frame as interleaved `re, im`
+/// pairs (`n = x.len() / 2` bins). For each `k` in `1..=twiddles_re.len()` it
+/// combines bins `k` and `n - k` into output bins `k` and `n - k` exactly as
+/// realfft does, and stores `re * re + im * im` of each in `power`. Plain
+/// multiplies and adds in realfft's order (no fused multiply-add), so SIMD and
+/// scalar results are bit-identical.
+///
+/// # Panics
+/// Panics if the twiddle slices differ in length, if they do not satisfy
+/// `2 * (len + 1) <= n`, or if `power` is shorter than `n + 1`.
+#[inline]
+pub fn real_fft_power_pairs(x: &[f32], twiddles_re: &[f32], twiddles_im: &[f32], power: &mut [f32]) {
+    let n = x.len() / 2;
+    assert_eq!(twiddles_re.len(), twiddles_im.len(), "real_fft_power_pairs: twiddle length mismatch");
+    assert!(2 * (twiddles_re.len() + 1) <= n, "real_fft_power_pairs: too many twiddles");
+    assert!(power.len() > n, "real_fft_power_pairs: power too short");
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        neon::real_fft_power_pairs(x, twiddles_re, twiddles_im, power)
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        scalar::real_fft_power_pairs(x, twiddles_re, twiddles_im, power, 1)
     }
 }
 
@@ -158,8 +241,10 @@ mod tests {
 
     #[test]
     fn dot_product_matches_reference() {
+        // Covers every resampler filter length from 8 kHz (16 taps) to 192 kHz
+        // (349 taps) input, plus every tail length of the SIMD loops.
         let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-        for len in 0..=67 {
+        for len in 0..=360 {
             for _ in 0..4 {
                 let a = gen_i16(&mut rng, len);
                 let b = gen_i16(&mut rng, len);
@@ -168,6 +253,73 @@ mod tests {
                     .zip(&b)
                     .fold(0i32, |acc, (&x, &y)| acc.wrapping_add(x as i32 * y as i32));
                 assert_eq!(dot_product_i16(&a, &b), expected, "len={len}");
+            }
+        }
+    }
+
+    #[test]
+    fn dot_product_x4_matches_single() {
+        let mut rng = Rng(0x0BAD_5EED_1234_5678);
+        for len in 0..=360 {
+            let a: Vec<Vec<i16>> = (0..4).map(|_| gen_i16(&mut rng, len)).collect();
+            let b: Vec<Vec<i16>> = (0..4).map(|_| gen_i16(&mut rng, len)).collect();
+            let a_refs = [0, 1, 2, 3].map(|k| a[k].as_slice());
+            let b_refs = [0, 1, 2, 3].map(|k| b[k].as_slice());
+            let expected = [0, 1, 2, 3].map(|k| {
+                a[k].iter()
+                    .zip(&b[k])
+                    .fold(0i32, |acc, (&x, &y)| acc.wrapping_add(x as i32 * y as i32))
+            });
+            assert_eq!(dot_product_i16_x4(a_refs, b_refs), expected, "len={len}");
+        }
+    }
+
+    #[test]
+    fn dot_product_x4_shared_matches_single() {
+        let mut rng = Rng(0x5851_F42D_4C95_7F2D);
+        for len in 0..=360 {
+            let a: Vec<Vec<i16>> = (0..4).map(|_| gen_i16(&mut rng, len)).collect();
+            let b = gen_i16(&mut rng, len);
+            let a_refs = [0, 1, 2, 3].map(|k| a[k].as_slice());
+            let expected = [0, 1, 2, 3].map(|k| {
+                a[k].iter()
+                    .zip(&b)
+                    .fold(0i32, |acc, (&x, &y)| acc.wrapping_add(x as i32 * y as i32))
+            });
+            assert_eq!(dot_product_i16_x4_shared(a_refs, &b), expected, "len={len}");
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn dot_product_x4_shared_length_mismatch_panics() {
+        let x = [1i16, 2, 3];
+        dot_product_i16_x4_shared([&x, &x, &x, &x], &x[..2]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn dot_product_x4_length_mismatch_panics() {
+        let x = [1i16, 2, 3];
+        dot_product_i16_x4([&x, &x, &x[..2], &x], [&x, &x, &x, &x]);
+    }
+
+    #[test]
+    fn real_fft_power_pairs_matches_scalar() {
+        // The scalar pass is the whole implementation off aarch64 and the
+        // tail on it; compare it from bin 1 with the dispatched version.
+        let mut rng = Rng(0x3C6E_F372_FE94_F82B);
+        for n in [4usize, 8, 12, 16, 20, 24, 64, 2048] {
+            let pairs = n / 2 - 1;
+            let x: Vec<f32> = (0..2 * n).map(|_| rng.i16() as f32 * 1.37).collect();
+            let tw_re: Vec<f32> = (0..pairs).map(|_| rng.i16() as f32 / 65536.0).collect();
+            let tw_im: Vec<f32> = (0..pairs).map(|_| rng.i16() as f32 / 65536.0).collect();
+            let mut want = vec![f32::NAN; n + 1];
+            scalar::real_fft_power_pairs(&x, &tw_re, &tw_im, &mut want, 1);
+            let mut got = vec![f32::NAN; n + 1];
+            real_fft_power_pairs(&x, &tw_re, &tw_im, &mut got);
+            for k in (1..=pairs).flat_map(|k| [k, n - k]) {
+                assert_eq!(got[k].to_bits(), want[k].to_bits(), "n={n} bin={k}");
             }
         }
     }

@@ -4,6 +4,9 @@
 //
 // Uses Kaiser-windowed sinc interpolation with fixed-point i16 arithmetic.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
 const FILTER_SHIFT: i32 = 15;
 const WINDOW_TYPE: i32 = 9; // Kaiser beta = 9
 
@@ -62,8 +65,70 @@ fn build_filter(
     }
 }
 
+/// Scale a filter accumulator back to a sample: round, shift out the filter
+/// gain, and saturate to i16 as libav's `av_clip_int16` does.
+#[inline(always)]
+fn round_and_saturate(val: i32) -> i16 {
+    let val = (val + (1 << (FILTER_SHIFT - 1))) >> FILTER_SHIFT;
+    if (val as u32).wrapping_add(32768) > 65535 {
+        ((val >> 31) ^ 32767) as i16
+    } else {
+        val as i16
+    }
+}
+
+/// Build the `phase_count + 1` filters of a bank (the extra one is the
+/// wraparound copy used by linear interpolation).
+fn build_filter_bank(factor: f64, filter_length: usize, phase_count: usize) -> Vec<i16> {
+    let mut filter_bank = vec![0i16; filter_length * (phase_count + 1)];
+
+    build_filter(
+        &mut filter_bank,
+        factor,
+        filter_length,
+        phase_count,
+        1 << FILTER_SHIFT,
+        WINDOW_TYPE,
+    );
+
+    // Copy wraparound for linear interpolation
+    filter_bank[filter_length * phase_count] = filter_bank[filter_length - 1];
+    for i in 1..filter_length {
+        filter_bank[filter_length * phase_count + i] = filter_bank[i - 1];
+    }
+    filter_bank
+}
+
+/// Constructor parameters that determine a filter bank: output rate, input
+/// rate, filter size, phase shift and the bits of the cutoff.
+type BankKey = (i32, i32, i32, i32, u64);
+
+/// Banks kept for reuse. Callers pass arbitrary input rates, so the cache is
+/// bounded; banks for further rates are built per context.
+const MAX_CACHED_BANKS: usize = 16;
+
+/// Building a bank takes ~0.6 ms at 44.1 kHz input, far more than any other
+/// per-stream setup, and it depends only on the constructor parameters, so
+/// every context with the same parameters shares one immutable bank.
+fn cached_filter_bank(key: BankKey, build: impl FnOnce() -> Vec<i16>) -> Arc<[i16]> {
+    static CACHE: OnceLock<Mutex<HashMap<BankKey, Arc<[i16]>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(bank) = cache.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
+        return Arc::clone(bank);
+    }
+    // Built without holding the lock, so first uses of different rates on
+    // different threads do not wait for each other.
+    let bank: Arc<[i16]> = build().into();
+    let mut cache = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    if cache.len() < MAX_CACHED_BANKS || cache.contains_key(&key) {
+        Arc::clone(cache.entry(key).or_insert(bank))
+    } else {
+        bank
+    }
+}
+
 pub struct AvResampleContext {
-    filter_bank: Vec<i16>,
+    filter_bank: Arc<[i16]>,
     filter_length: usize,
     dst_incr: i32,
     index: i32,
@@ -86,23 +151,10 @@ impl AvResampleContext {
         let phase_count = 1i32 << phase_shift;
 
         let filter_length = ((filter_size as f64 / factor).ceil() as usize).max(1);
-        let mut filter_bank = vec![0i16; filter_length * (phase_count as usize + 1)];
-
-        build_filter(
-            &mut filter_bank,
-            factor,
-            filter_length,
-            phase_count as usize,
-            1 << FILTER_SHIFT,
-            WINDOW_TYPE,
-        );
-
-        // Copy wraparound for linear interpolation
-        let pc = phase_count as usize;
-        filter_bank[filter_length * pc] = filter_bank[filter_length - 1];
-        for i in 1..filter_length {
-            filter_bank[filter_length * pc + i] = filter_bank[i - 1];
-        }
+        let key = (out_rate, in_rate, filter_size, phase_shift, cutoff.to_bits());
+        let filter_bank = cached_filter_bank(key, || {
+            build_filter_bank(factor, filter_length, phase_count as usize)
+        });
 
         AvResampleContext {
             filter_bank,
@@ -125,6 +177,28 @@ impl AvResampleContext {
         consumed: &mut usize,
         dst_size: usize,
     ) -> usize {
+        profile_stage!(Resample);
+        // With an integer rate ratio (22.05, 44.1, 88.2 kHz input to 11025 Hz)
+        // `frac` never moves and every step is a whole number of input samples,
+        // so the filter phase stays the same for the whole call. Each case gets
+        // its own copy of the loop with only the kernel it uses.
+        let constant_phase =
+            self.dst_incr % self.src_incr == 0 && (self.dst_incr / self.src_incr) & self.phase_mask == 0;
+        if constant_phase {
+            self.resample_with::<true>(dst, src, consumed, dst_size)
+        } else {
+            self.resample_with::<false>(dst, src, consumed, dst_size)
+        }
+    }
+
+    #[inline(always)]
+    fn resample_with<const CONSTANT_PHASE: bool>(
+        &mut self,
+        dst: &mut [i16],
+        src: &[i16],
+        consumed: &mut usize,
+        dst_size: usize,
+    ) -> usize {
         let src_size = src.len() as i32;
         let filter_length = self.filter_length;
         let filter_bank = &self.filter_bank;
@@ -138,6 +212,47 @@ impl AvResampleContext {
         let mut dst_index = 0usize;
 
         while dst_index < dst_size {
+            // Four outputs per pass while all of their input windows are in
+            // bounds; `index` only grows, so checking the last one covers all.
+            if index >= 0 && dst_index + 4 <= dst_size {
+                let mut indices = [0i32; 4];
+                let (mut next_index, mut next_frac) = (index, frac);
+                for slot in &mut indices {
+                    *slot = next_index;
+                    next_frac += dst_incr_frac;
+                    next_index += dst_incr;
+                    if next_frac >= src_incr {
+                        next_frac -= src_incr;
+                        next_index += 1;
+                    }
+                }
+                if (indices[3] >> phase_shift) + filter_length as i32 <= src_size {
+                    // SAFETY: indices[0] >= 0 and indices[3] passed the bound
+                    // check above, so every window lies in src; every phase is
+                    // < phase_count and the bank holds phase_count + 1 filters.
+                    let windows = indices.map(|i| unsafe {
+                        let si = (i >> phase_shift) as usize;
+                        src.get_unchecked(si..si + filter_length)
+                    });
+                    let filter = |i: i32| unsafe {
+                        let offset = filter_length * ((i & phase_mask) as usize);
+                        filter_bank.get_unchecked(offset..offset + filter_length)
+                    };
+                    let vals = if CONSTANT_PHASE {
+                        crate::simd::dot_product_i16_x4_shared(windows, filter(indices[0]))
+                    } else {
+                        crate::simd::dot_product_i16_x4(windows, indices.map(filter))
+                    };
+                    for (out, val) in dst[dst_index..dst_index + 4].iter_mut().zip(vals) {
+                        *out = round_and_saturate(val);
+                    }
+                    index = next_index;
+                    frac = next_frac;
+                    dst_index += 4;
+                    continue;
+                }
+            }
+
             let filter_offset = filter_length * ((index & phase_mask) as usize);
             let sample_index = index >> phase_shift;
 
@@ -147,12 +262,7 @@ impl AvResampleContext {
                     let si = ((sample_index + i).abs() % src_size) as usize;
                     val += src[si] as i32 * filter_bank[filter_offset + i as usize] as i32;
                 }
-                val = (val + (1 << (FILTER_SHIFT - 1))) >> FILTER_SHIFT;
-                dst[dst_index] = if (val as u32).wrapping_add(32768) > 65535 {
-                    ((val >> 31) ^ 32767) as i16
-                } else {
-                    val as i16
-                };
+                dst[dst_index] = round_and_saturate(val);
             } else if sample_index + filter_length as i32 > src_size {
                 break;
             } else {
@@ -160,16 +270,11 @@ impl AvResampleContext {
                 // src bounds, and filter_offset..filter_offset+filter_length is within
                 // filter_bank bounds (phase < phase_count, bank has phase_count+1 phases).
                 let si = sample_index as usize;
-                let mut val: i32 = crate::simd::dot_product_i16(
+                let val = crate::simd::dot_product_i16(
                     &src[si..si + filter_length],
                     &filter_bank[filter_offset..filter_offset + filter_length],
                 );
-                val = (val + (1 << (FILTER_SHIFT - 1))) >> FILTER_SHIFT;
-                dst[dst_index] = if (val as u32).wrapping_add(32768) > 65535 {
-                    ((val >> 31) ^ 32767) as i16
-                } else {
-                    val as i16
-                };
+                dst[dst_index] = round_and_saturate(val);
             }
 
             frac += dst_incr_frac;
@@ -191,5 +296,135 @@ impl AvResampleContext {
         self.dst_incr = dst_incr_frac + src_incr * dst_incr;
 
         dst_index
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `resample` as ported from C (`avresample/resample2.c`), one output at a
+    /// time with a scalar dot product. Any faster `resample` must produce the
+    /// same samples and leave the same state.
+    fn resample_reference(
+        ctx: &mut AvResampleContext,
+        dst: &mut [i16],
+        src: &[i16],
+        consumed: &mut usize,
+        dst_size: usize,
+    ) -> usize {
+        let src_size = src.len() as i32;
+        let mut index = ctx.index;
+        let mut frac = ctx.frac;
+        let dst_incr_frac = ctx.dst_incr % ctx.src_incr;
+        let dst_incr = ctx.dst_incr / ctx.src_incr;
+        let mut dst_index = 0usize;
+
+        while dst_index < dst_size {
+            let filter = &ctx.filter_bank[ctx.filter_length * ((index & ctx.phase_mask) as usize)..];
+            let sample_index = index >> ctx.phase_shift;
+            if sample_index >= 0 && sample_index + ctx.filter_length as i32 > src_size {
+                break;
+            }
+            let mut val: i32 = 0;
+            for i in 0..ctx.filter_length as i32 {
+                let si = if sample_index < 0 {
+                    ((sample_index + i).abs() % src_size) as usize
+                } else {
+                    (sample_index + i) as usize
+                };
+                val = val.wrapping_add(src[si] as i32 * filter[i as usize] as i32);
+            }
+            val = val.wrapping_add(1 << (FILTER_SHIFT - 1)) >> FILTER_SHIFT;
+            dst[dst_index] = val.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+
+            frac += dst_incr_frac;
+            index += dst_incr;
+            if frac >= ctx.src_incr {
+                frac -= ctx.src_incr;
+                index += 1;
+            }
+            dst_index += 1;
+        }
+
+        *consumed = (index.max(0) >> ctx.phase_shift) as usize;
+        if index >= 0 {
+            index &= ctx.phase_mask;
+        }
+        ctx.frac = frac;
+        ctx.index = index;
+        ctx.dst_incr = dst_incr_frac + ctx.src_incr * dst_incr;
+        dst_index
+    }
+
+    #[test]
+    fn cached_filter_banks_match_fresh_builds() {
+        // Checked first, while other tests have cached fewer than
+        // MAX_CACHED_BANKS rates, so 44.1 kHz is guaranteed a cache slot.
+        let a = AvResampleContext::new(11025, 44100, 16, 8, false, 0.8);
+        let b = AvResampleContext::new(11025, 44100, 16, 8, false, 0.8);
+        assert!(Arc::ptr_eq(&a.filter_bank, &b.filter_bank), "44.1 kHz bank was not shared");
+
+        // More rates than the cache holds, each requested twice: cached and
+        // uncached banks alike must equal a fresh build.
+        for in_rate in (0..2 * MAX_CACHED_BANKS as i32).map(|i| 8000 + i * 5513) {
+            for _ in 0..2 {
+                let ctx = AvResampleContext::new(11025, in_rate, 16, 8, false, 0.8);
+                let factor = (11025.0 * 0.8 / in_rate as f64).min(1.0);
+                let fresh = build_filter_bank(factor, ctx.filter_length, 256);
+                assert_eq!(ctx.filter_bank[..], fresh[..], "in_rate={in_rate}");
+            }
+        }
+    }
+
+    #[test]
+    fn resample_matches_reference() {
+        let mut state = 0x853C_49E6_748F_EA9Bu64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Mostly full-scale noise, with runs of extremes to drive saturation.
+        let input: Vec<i16> = (0..200_000)
+            .map(|i| match (i / 1000) % 7 {
+                0 => i16::MAX,
+                1 => i16::MIN,
+                _ => next() as i16,
+            })
+            .collect();
+
+        for in_rate in [8000, 16000, 22050, 44100, 48000, 96000, 192000] {
+            let mut fast = AvResampleContext::new(11025, in_rate, 16, 8, false, 0.8);
+            let mut reference = AvResampleContext::new(11025, in_rate, 16, 8, false, 0.8);
+            let (mut fast_out, mut ref_out) = (vec![0i16; 8192], vec![0i16; 8192]);
+            let mut pos = 0;
+            // Uneven chunks and output limits, carrying unconsumed input over as
+            // AudioProcessor does, so batch boundaries land everywhere.
+            for call in 0.. {
+                let len = (1000 + (call * 7919) % 30_000).min(input.len() - pos);
+                if len == 0 {
+                    break;
+                }
+                let src = &input[pos..pos + len];
+                let dst_size = 1 + (call * 4111) % 8192;
+                let (mut fast_consumed, mut ref_consumed) = (0, 0);
+                let n = fast.resample(&mut fast_out, src, &mut fast_consumed, dst_size);
+                let n_ref = resample_reference(&mut reference, &mut ref_out, src, &mut ref_consumed, dst_size);
+                assert_eq!(n, n_ref, "rate={in_rate} call={call}: output count");
+                assert_eq!(fast_out[..n], ref_out[..n], "rate={in_rate} call={call}: samples");
+                assert_eq!(fast_consumed, ref_consumed, "rate={in_rate} call={call}: consumed");
+                assert_eq!(
+                    (fast.index, fast.frac, fast.dst_incr),
+                    (reference.index, reference.frac, reference.dst_incr),
+                    "rate={in_rate} call={call}: state"
+                );
+                pos += fast_consumed.min(len);
+                if fast_consumed == 0 {
+                    pos += len;
+                }
+            }
+        }
     }
 }

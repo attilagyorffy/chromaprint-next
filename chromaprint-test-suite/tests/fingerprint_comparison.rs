@@ -224,3 +224,22 @@ fn test_encode_decode_roundtrip_via_both() {
     assert_eq!(rs_algo, Algorithm::Test2);
     compare_fingerprints("cross_decode_encode", &c_raw, &rs_decoded);
 }
+
+#[test]
+fn test_resampler_filter_lengths() {
+    // Declaring the same samples at other input rates exercises every resampler
+    // filter length (and SIMD dot-product tail) that real inputs produce:
+    // 16 kHz -> 30 taps, 22.05 kHz -> 40, 32 kHz -> 59, 48 kHz -> 88,
+    // 88.2 kHz -> 160, 96 kHz -> 175, 192 kHz -> 349.
+    // The 2 s clip is repeated to 10 s at each rate so every rate yields a fingerprint.
+    let clip = load_raw_audio("test_mono_44100.raw");
+
+    for sample_rate in [16000, 22050, 32000, 48000, 88200, 96000, 192000] {
+        let data: Vec<i16> = clip.iter().copied().cycle().take(sample_rate as usize * 10).collect();
+        let (c_raw, c_encoded, _, rs_raw, rs_encoded, _) =
+            fingerprint_both(&data, sample_rate, 1, ALGORITHM_TEST2, Algorithm::Test2);
+        assert!(!c_raw.is_empty(), "{sample_rate} Hz: empty C fingerprint");
+        compare_fingerprints(&format!("mono_as_{sample_rate}"), &c_raw, &rs_raw);
+        assert_eq!(c_encoded, rs_encoded, "{sample_rate} Hz: encoded fingerprints differ");
+    }
+}

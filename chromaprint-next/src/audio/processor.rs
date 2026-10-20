@@ -79,16 +79,19 @@ impl AudioProcessor {
 
             match num_channels {
                 1 => {
+                    profile_stage!(ChannelMix);
                     self.buffer[self.buffer_offset..self.buffer_offset + to_load]
                         .copy_from_slice(&input[pos..pos + to_load]);
                 }
                 2 => {
+                    profile_stage!(ChannelMix);
                     crate::simd::stereo_to_mono(
                         &input[pos * 2..(pos + to_load) * 2],
                         &mut self.buffer[self.buffer_offset..self.buffer_offset + to_load],
                     );
                 }
                 _ => {
+                    profile_stage!(ChannelMix);
                     for i in 0..to_load {
                         let idx = (pos + i) * num_channels;
                         let mut sum: i32 = 0;

@@ -31,6 +31,7 @@ impl ChromaFilter {
     /// Feed a chroma vector into the filter.
     /// Returns Some(filtered_vector) when enough frames have been buffered.
     pub fn consume(&mut self, features: &ChromaVector) -> Option<ChromaVector> {
+        profile_stage!(ChromaFilter);
         let idx = (self.buffer_offset + self.buffer_size) % BUFFER_SIZE;
         self.buffer[idx] = *features;
         self.buffer_size += 1;
