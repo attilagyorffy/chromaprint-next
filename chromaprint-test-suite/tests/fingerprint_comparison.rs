@@ -22,6 +22,12 @@ fn fingerprint_both(
     let c_raw = c_ctx.get_raw_fingerprint();
     let c_encoded = c_ctx.get_fingerprint();
     let c_hash = c_ctx.get_fingerprint_hash();
+    // Two empty fingerprints are equal without anything having been compared.
+    assert!(
+        !c_raw.is_empty(),
+        "input too short: C produced no sub-fingerprints ({} samples at {sample_rate} Hz x {num_channels})",
+        data.len()
+    );
 
     // Rust implementation
     let mut rs_ctx = Fingerprinter::new(algorithm_rs);
@@ -65,6 +71,13 @@ fn test_stereo_44100_as_mono() {
     );
 }
 
+/// One of the C library's audio processor fixtures (2 s, too short for a
+/// fingerprint) repeated to 20 s.
+fn fixture_20s(name: &str, sample_rate: usize, num_channels: usize) -> Vec<i16> {
+    let clip = load_raw_audio(name);
+    clip.iter().copied().cycle().take(sample_rate * num_channels * 20).collect()
+}
+
 #[test]
 fn test_silence() {
     // 130 * 1024 zero samples at 44100 Hz mono
@@ -87,7 +100,7 @@ fn test_silence() {
 
 #[test]
 fn test_mono_44100() {
-    let data = load_raw_audio("test_mono_44100.raw");
+    let data = fixture_20s("test_mono_44100.raw", 44100, 1);
 
     let (c_raw, c_encoded, c_hash, rs_raw, rs_encoded, rs_hash) =
         fingerprint_both(&data, 44100, 1, ALGORITHM_TEST2, Algorithm::Test2);
@@ -100,7 +113,7 @@ fn test_mono_44100() {
 #[test]
 fn test_mono_11025() {
     // At the internal sample rate — no resampling needed
-    let data = load_raw_audio("test_mono_11025.raw");
+    let data = fixture_20s("test_mono_11025.raw", 11025, 1);
 
     let (c_raw, c_encoded, c_hash, rs_raw, rs_encoded, rs_hash) =
         fingerprint_both(&data, 11025, 1, ALGORITHM_TEST2, Algorithm::Test2);
@@ -113,7 +126,7 @@ fn test_mono_11025() {
 #[test]
 fn test_stereo_44100() {
     // Stereo with proper 2-channel declaration (will be downmixed to mono)
-    let data = load_raw_audio("test_stereo_44100.raw");
+    let data = fixture_20s("test_stereo_44100.raw", 44100, 2);
 
     let (c_raw, c_encoded, c_hash, rs_raw, rs_encoded, rs_hash) =
         fingerprint_both(&data, 44100, 2, ALGORITHM_TEST2, Algorithm::Test2);
@@ -125,7 +138,7 @@ fn test_stereo_44100() {
 
 #[test]
 fn test_mono_8000() {
-    let data = load_raw_audio("test_mono_8000.raw");
+    let data = fixture_20s("test_mono_8000.raw", 8000, 1);
 
     let (c_raw, c_encoded, c_hash, rs_raw, rs_encoded, rs_hash) =
         fingerprint_both(&data, 8000, 1, ALGORITHM_TEST2, Algorithm::Test2);
