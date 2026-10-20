@@ -4,6 +4,9 @@
 //
 // Uses Kaiser-windowed sinc interpolation with fixed-point i16 arithmetic.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
 const FILTER_SHIFT: i32 = 15;
 const WINDOW_TYPE: i32 = 9; // Kaiser beta = 9
 
@@ -74,8 +77,58 @@ fn round_and_saturate(val: i32) -> i16 {
     }
 }
 
+/// Build the `phase_count + 1` filters of a bank (the extra one is the
+/// wraparound copy used by linear interpolation).
+fn build_filter_bank(factor: f64, filter_length: usize, phase_count: usize) -> Vec<i16> {
+    let mut filter_bank = vec![0i16; filter_length * (phase_count + 1)];
+
+    build_filter(
+        &mut filter_bank,
+        factor,
+        filter_length,
+        phase_count,
+        1 << FILTER_SHIFT,
+        WINDOW_TYPE,
+    );
+
+    // Copy wraparound for linear interpolation
+    filter_bank[filter_length * phase_count] = filter_bank[filter_length - 1];
+    for i in 1..filter_length {
+        filter_bank[filter_length * phase_count + i] = filter_bank[i - 1];
+    }
+    filter_bank
+}
+
+/// Constructor parameters that determine a filter bank: output rate, input
+/// rate, filter size, phase shift and the bits of the cutoff.
+type BankKey = (i32, i32, i32, i32, u64);
+
+/// Banks kept for reuse. Callers pass arbitrary input rates, so the cache is
+/// bounded; banks for further rates are built per context.
+const MAX_CACHED_BANKS: usize = 16;
+
+/// Building a bank takes ~0.6 ms at 44.1 kHz input, far more than any other
+/// per-stream setup, and it depends only on the constructor parameters, so
+/// every context with the same parameters shares one immutable bank.
+fn cached_filter_bank(key: BankKey, build: impl FnOnce() -> Vec<i16>) -> Arc<[i16]> {
+    static CACHE: OnceLock<Mutex<HashMap<BankKey, Arc<[i16]>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(bank) = cache.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
+        return Arc::clone(bank);
+    }
+    // Built without holding the lock, so first uses of different rates on
+    // different threads do not wait for each other.
+    let bank: Arc<[i16]> = build().into();
+    let mut cache = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    if cache.len() < MAX_CACHED_BANKS || cache.contains_key(&key) {
+        Arc::clone(cache.entry(key).or_insert(bank))
+    } else {
+        bank
+    }
+}
+
 pub struct AvResampleContext {
-    filter_bank: Vec<i16>,
+    filter_bank: Arc<[i16]>,
     filter_length: usize,
     dst_incr: i32,
     index: i32,
@@ -98,23 +151,10 @@ impl AvResampleContext {
         let phase_count = 1i32 << phase_shift;
 
         let filter_length = ((filter_size as f64 / factor).ceil() as usize).max(1);
-        let mut filter_bank = vec![0i16; filter_length * (phase_count as usize + 1)];
-
-        build_filter(
-            &mut filter_bank,
-            factor,
-            filter_length,
-            phase_count as usize,
-            1 << FILTER_SHIFT,
-            WINDOW_TYPE,
-        );
-
-        // Copy wraparound for linear interpolation
-        let pc = phase_count as usize;
-        filter_bank[filter_length * pc] = filter_bank[filter_length - 1];
-        for i in 1..filter_length {
-            filter_bank[filter_length * pc + i] = filter_bank[i - 1];
-        }
+        let key = (out_rate, in_rate, filter_size, phase_shift, cutoff.to_bits());
+        let filter_bank = cached_filter_bank(key, || {
+            build_filter_bank(factor, filter_length, phase_count as usize)
+        });
 
         AvResampleContext {
             filter_bank,
@@ -290,6 +330,26 @@ mod tests {
         ctx.index = index;
         ctx.dst_incr = dst_incr_frac + ctx.src_incr * dst_incr;
         dst_index
+    }
+
+    #[test]
+    fn cached_filter_banks_match_fresh_builds() {
+        // Checked first, while other tests have cached fewer than
+        // MAX_CACHED_BANKS rates, so 44.1 kHz is guaranteed a cache slot.
+        let a = AvResampleContext::new(11025, 44100, 16, 8, false, 0.8);
+        let b = AvResampleContext::new(11025, 44100, 16, 8, false, 0.8);
+        assert!(Arc::ptr_eq(&a.filter_bank, &b.filter_bank), "44.1 kHz bank was not shared");
+
+        // More rates than the cache holds, each requested twice: cached and
+        // uncached banks alike must equal a fresh build.
+        for in_rate in (0..2 * MAX_CACHED_BANKS as i32).map(|i| 8000 + i * 5513) {
+            for _ in 0..2 {
+                let ctx = AvResampleContext::new(11025, in_rate, 16, 8, false, 0.8);
+                let factor = (11025.0 * 0.8 / in_rate as f64).min(1.0);
+                let fresh = build_filter_bank(factor, ctx.filter_length, 256);
+                assert_eq!(ctx.filter_bank[..], fresh[..], "in_rate={in_rate}");
+            }
+        }
     }
 
     #[test]
