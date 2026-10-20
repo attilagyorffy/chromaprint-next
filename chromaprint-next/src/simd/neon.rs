@@ -147,6 +147,57 @@ pub fn dot_product_i16_x4(a: [&[i16]; 4], b: [&[i16]; 4]) -> [i32; 4] {
     }
 }
 
+/// [`dot_product_i16_x4`] with one `b` shared by all four products, loaded
+/// once per chunk instead of four times.
+#[inline]
+pub fn dot_product_i16_x4_shared(a: [&[i16]; 4], b: &[i16]) -> [i32; 4] {
+    let len = b.len();
+    debug_assert!(a.iter().all(|s| s.len() == len));
+
+    unsafe {
+        let ap = a.map(<[i16]>::as_ptr);
+        let bp = b.as_ptr();
+
+        let mut lo = [vdupq_n_s32(0); 4];
+        let mut hi = [vdupq_n_s32(0); 4];
+
+        let mut offset = 0;
+        while offset + 8 <= len {
+            let bv = vld1q_s16(bp.add(offset));
+            for k in 0..4 {
+                let av = vld1q_s16(ap[k].add(offset));
+                lo[k] = vmlal_s16(lo[k], vget_low_s16(av), vget_low_s16(bv));
+                hi[k] = vmlal_high_s16(hi[k], av, bv);
+            }
+            offset += 8;
+        }
+
+        // 4-element remainder chunk
+        if len - offset >= 4 {
+            let bv = vld1_s16(bp.add(offset));
+            for k in 0..4 {
+                let av = vld1_s16(ap[k].add(offset));
+                lo[k] = vmlal_s16(lo[k], av, bv);
+            }
+            offset += 4;
+        }
+
+        let s = [0, 1, 2, 3].map(|k| vaddq_s32(lo[k], hi[k]));
+        let sums = vpaddq_s32(vpaddq_s32(s[0], s[1]), vpaddq_s32(s[2], s[3]));
+        let mut result = [0i32; 4];
+        vst1q_s32(result.as_mut_ptr(), sums);
+
+        // Scalar tail (0-3 elements)
+        for (k, r) in result.iter_mut().enumerate() {
+            for i in offset..len {
+                *r = r.wrapping_add(*ap[k].add(i) as i32 * *bp.add(i) as i32);
+            }
+        }
+
+        result
+    }
+}
+
 /// Reverse the four lanes of a vector.
 #[inline(always)]
 unsafe fn reverse_f32x4(v: float32x4_t) -> float32x4_t {

@@ -42,6 +42,22 @@ fn kernel_benchmarks(c: &mut Criterion) {
                 acc
             });
         });
+        // The same, with the filter shared as at integer rate ratios.
+        group.bench_function(format!("dot_product_i16_x4_shared_{len}x1024"), |b| {
+            b.iter(|| {
+                let mut acc = 0i32;
+                for start in (0..1024).step_by(4) {
+                    let windows = [0, 1, 2, 3].map(|k| {
+                        let s = (start + k) * 4;
+                        std::hint::black_box(&audio[s..s + len])
+                    });
+                    for v in simd::dot_product_i16_x4_shared(windows, &taps) {
+                        acc = acc.wrapping_add(v);
+                    }
+                }
+                acc
+            });
+        });
     }
 
     // Windowing one FFT frame: i16 samples to f32 times the Hamming window.

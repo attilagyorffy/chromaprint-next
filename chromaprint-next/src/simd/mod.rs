@@ -115,6 +115,30 @@ pub fn stereo_to_mono(input: &[i16], output: &mut [i16]) {
     }
 }
 
+/// [`dot_product_i16_x4`] with the same `b` for all four products: the
+/// resampler's case when the rate ratio is an integer, so every output uses
+/// the same filter phase.
+///
+/// # Panics
+/// Panics if the five slices do not all have the same length.
+#[inline]
+pub fn dot_product_i16_x4_shared(a: [&[i16]; 4], b: &[i16]) -> [i32; 4] {
+    assert!(
+        a.iter().all(|s| s.len() == b.len()),
+        "dot_product_i16_x4_shared: length mismatch"
+    );
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        neon::dot_product_i16_x4_shared(a, b)
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        [0, 1, 2, 3].map(|k| dot_product_i16(a[k], b))
+    }
+}
+
 /// The twiddle pass of a real FFT (realfft's `RealToComplexEven`), writing
 /// power instead of complex bins.
 ///
@@ -248,6 +272,29 @@ mod tests {
             });
             assert_eq!(dot_product_i16_x4(a_refs, b_refs), expected, "len={len}");
         }
+    }
+
+    #[test]
+    fn dot_product_x4_shared_matches_single() {
+        let mut rng = Rng(0x5851_F42D_4C95_7F2D);
+        for len in 0..=360 {
+            let a: Vec<Vec<i16>> = (0..4).map(|_| gen_i16(&mut rng, len)).collect();
+            let b = gen_i16(&mut rng, len);
+            let a_refs = [0, 1, 2, 3].map(|k| a[k].as_slice());
+            let expected = [0, 1, 2, 3].map(|k| {
+                a[k].iter()
+                    .zip(&b)
+                    .fold(0i32, |acc, (&x, &y)| acc.wrapping_add(x as i32 * y as i32))
+            });
+            assert_eq!(dot_product_i16_x4_shared(a_refs, &b), expected, "len={len}");
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn dot_product_x4_shared_length_mismatch_panics() {
+        let x = [1i16, 2, 3];
+        dot_product_i16_x4_shared([&x, &x, &x, &x], &x[..2]);
     }
 
     #[test]
